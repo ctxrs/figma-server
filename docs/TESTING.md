@@ -141,7 +141,7 @@ These results apply to that archive, not to subsequent source changes or a
 future release archive. Playwright was 1.63.0 and MCP SDK was 1.31.0.
 The earlier Windows baseline checked CLI entry execution and shim presence,
 not actual `.cmd` invocation or the later NTFS ACL implementation. Those changes
-require a fresh native Windows replay; they are not covered by baseline reuse.
+are qualified separately below; they are not covered by baseline reuse.
 
 | Native environment | Node | Actual browser mode | Result and scope |
 | --- | --- | --- | --- |
@@ -165,14 +165,34 @@ A subsequent candidate, SHA-256
 `f75f61ecfa1a25a6d37c0cd5e1eae04a5a5e71c1d85cf3e09e238cdbeb16a73b`,
 passed full installed-archive qualification on Ubuntu/Node 22.22.2 with system
 Chrome, including actual local/global npm shim invocation, MCP initialization
-and natural EOF session/lease cleanup. Its new Windows NTFS implementation and
-`.cmd` launcher path require fresh native evidence; the earlier Windows archive
-pass does not qualify those changes. macOS and Linux Node 24 entries above
+and natural EOF session/lease cleanup. macOS and Linux Node 24 entries above
 remain evidence for the earlier digest rather than silently becoming passes
 for the new archive.
-The fresh Windows replay attempt never passed disk admission and timed out
-before guest execution. Its ACL and `.cmd` checks remain pending; this is an
-infrastructure block, not a native pass or a product-test failure.
+
+The same f75 archive passed all six installed-archive qualification steps on
+Windows x64, OS release `10.0.26200`, Node 22.23.3 and 24.21.0, with bundled
+Chromium 153.0.8010.12. Replay `req-1ca458e7582c43d5` exited 0 with untruncated
+output and both explicit Node pass summaries. Actual local/global npm `.cmd`
+shims ran through `cmd.exe /d /s /c`: help/init, MCP handshake, natural EOF exit
+0 and zero remaining sessions/leases all passed. Protected state, SQLite,
+receipt and PNG ACL audits, SYSTEM-owner rejection, hard-link/junction rejection,
+replacement protection and missing-PowerShell fail-closed checks passed,
+alongside real browser crash/recovery and MCP/HTTP auth/concurrency fixtures.
+
+This is **elevated Windows lab-token coverage**. Protected paths had current-SID
+ownership and only current-SID FullControl. Three Chromium-created descendants
+had Administrators ownership and exactly one inherited current-SID FullControl
+ACE, consistent with the trusted-administrator boundary. Ordinary non-admin
+setup, Windows desktop MCP clients and interactive sign-in remain unproven.
+No account, privilege or machine-policy changes were made.
+
+Two earlier attempts timed out before disk admission. Native receipt
+`req-42f6926c33ff4ec0` then failed an overly strict browser-descendant owner
+assertion; this was resolved by a reviewed harness correction, not a production
+fix. Both failed and passing receipts are retained outside the checkout under
+`/tmp/figma-final-native.M60zOM`; the passing summary is
+`descendant-audit-replay/windows-qualification.json`. These results qualify f75's
+Windows ACL/launcher behavior, not a later archive or live Figma editing.
 
 ## Governed Windows replay
 
