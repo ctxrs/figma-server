@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { access } from 'node:fs/promises';
-import { chromium, type BrowserContext, type Page } from 'playwright';
+import { chromium, type BrowserContext, type Page, type FileChooser } from 'playwright';
 import { type Config, State, privateDirectory } from './state.js';
-import { LIMITS, permittedNavigation, sameFile, type Expectation, type LocatorSpec } from './security.js';
+import { LIMITS, permittedNavigation, sameFile, modifierKeys, type Modifier, type ImagePayload, type Expectation, type LocatorSpec } from './security.js';
 import { Fault, fault } from './errors.js';
 import { inspection, locate, pasteHtml, probe, readValue, requireEditor, requireEditing, verify, type Readiness, type Verification } from './figma-adapter.js';
 
@@ -15,13 +15,14 @@ export interface BrowserTab {
   readValue(locator: LocatorSpec): Promise<string>;
   reload(): Promise<void>;
   screenshot(scope?: LocatorSpec): Promise<Buffer>;
-  click(locator: LocatorSpec): Promise<void>;
-  pointerClick(point: { x: number; y: number }, clicks: 1 | 2, button: 'left' | 'right'): Promise<void>;
+  click(locator: LocatorSpec, modifiers?: Modifier[]): Promise<void>;
+  pointerClick(point: { x: number; y: number }, clicks: 1 | 2, button: 'left' | 'right', modifiers?: Modifier[]): Promise<void>;
   typeText(text: string): Promise<void>;
   wheel(point: { x: number; y: number }, deltaX: number, deltaY: number): Promise<void>;
   fill(locator: LocatorSpec, text: string): Promise<void>;
   keypress(keys: string): Promise<void>;
-  drag(from: { x: number; y: number }, to: { x: number; y: number }): Promise<void>;
+  drag(from: { x: number; y: number }, to: { x: number; y: number }, modifiers?: Modifier[]): Promise<void>;
+  uploadImage?(image: ImagePayload, trigger: LocatorSpec, signal?: AbortSignal): Promise<void>;
   paste(html: string, target?: LocatorSpec): Promise<void>;
   verify(expectation?: Expectation): Promise<Verification>;
   metrics(): Promise<Record<string, number>>;
@@ -215,7 +216,7 @@ export class BrowserSupervisor implements BrowserBackend {
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
         await Promise.race([confirm(), new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(new Error('login_timeout')), LIMITS.loginMs);
+          timer = setTimeout(() => reject(new Fault('login_timeout', 'Login timed out; run login again to retry.', 409)), LIMITS.loginMs);
         })]);
       } finally { if (timer) clearTimeout(timer); }
       const { expectedKey } = await import('./figma-adapter.js');
@@ -266,9 +267,22 @@ export class PlaywrightTab implements BrowserTab {
     return scope ? locate(this.page, scope).screenshot({ type: 'png', timeout: 5000 })
       : this.page.screenshot({ type: 'png', fullPage: false, timeout: 5000 });
   }
-  click(spec: LocatorSpec): Promise<void> { return locate(this.page, spec).click(); }
-  pointerClick(point: { x: number; y: number }, clicks: 1 | 2, button: 'left' | 'right'): Promise<void> {
-    return this.page.mouse.click(point.x, point.y, { clickCount: clicks, button });
+  private async withModifiers(modifiers: Modifier[] | undefined, operation: () => Promise<void>): Promise<void> {
+    const pressed: string[] = [];
+    try {
+      for (const key of modifierKeys(modifiers ?? [])) { pressed.push(key); await this.page.keyboard.down(key); }
+      await operation();
+    } finally {
+      let failed = false;
+      for (const key of pressed.reverse()) { try { await this.page.keyboard.up(key); } catch { failed = true; } }
+      if (failed && !this.page.isClosed()) fault('modifier_cleanup_failed', 'Modifier release could not be confirmed; close the target.', 409);
+    }
+  }
+  click(spec: LocatorSpec, modifiers?: Modifier[]): Promise<void> {
+    return this.withModifiers(modifiers, () => locate(this.page, spec).click());
+  }
+  pointerClick(point: { x: number; y: number }, clicks: 1 | 2, button: 'left' | 'right', modifiers?: Modifier[]): Promise<void> {
+    return this.withModifiers(modifiers, () => this.page.mouse.click(point.x, point.y, { clickCount: clicks, button }));
   }
   typeText(text: string): Promise<void> { return this.page.keyboard.insertText(text); }
   async wheel(point: { x: number; y: number }, deltaX: number, deltaY: number): Promise<void> {
@@ -276,10 +290,38 @@ export class PlaywrightTab implements BrowserTab {
   }
   fill(spec: LocatorSpec, text: string): Promise<void> { return locate(this.page, spec).fill(text); }
   keypress(keys: string): Promise<void> { return this.page.keyboard.press(keys); }
-  async drag(from: { x: number; y: number }, to: { x: number; y: number }): Promise<void> {
-    await this.page.mouse.move(from.x, from.y);
-    await this.page.mouse.down();
-    try { await this.page.mouse.move(to.x, to.y, { steps: 10 }); } finally { await this.page.mouse.up(); }
+  drag(from: { x: number; y: number }, to: { x: number; y: number }, modifiers?: Modifier[]): Promise<void> {
+    return this.withModifiers(modifiers, async () => {
+      await this.page.mouse.move(from.x, from.y);
+      try {
+        await this.page.mouse.down();
+        await this.page.mouse.move(to.x, to.y, { steps: 10 });
+      } finally { await this.page.mouse.up(); }
+    });
+  }
+  async uploadImage(image: ImagePayload, trigger: LocatorSpec, signal?: AbortSignal): Promise<void> {
+    let choose!: (chooser: FileChooser) => void, reject!: (error: unknown) => void;
+    const ready = new Promise<FileChooser>((resolve, fail) => { choose = resolve; reject = fail; });
+    void ready.catch(() => undefined);
+    const aborted = () => reject(new Fault('cancelled', 'Image upload was cancelled.', 409));
+    const closed = () => reject(new Fault('target_invalid', 'Image upload target closed.', 409));
+    const timer = setTimeout(() => reject(new Fault('upload_timeout', 'The trigger did not open a file chooser.', 409)), 5000);
+    this.page.once('filechooser', choose);
+    this.page.once('close', closed);
+    signal?.addEventListener('abort', aborted, { once: true });
+    try {
+      signal?.throwIfAborted();
+      await locate(this.page, trigger).click({ timeout: 5000 });
+      const chooser = await ready;
+      signal?.throwIfAborted();
+      await this.check(true);
+      await chooser.setFiles({ name: image.name, mimeType: image.mimeType, buffer: image.buffer }, { timeout: 5000 });
+    } finally {
+      clearTimeout(timer);
+      this.page.removeListener('filechooser', choose);
+      this.page.removeListener('close', closed);
+      signal?.removeEventListener('abort', aborted);
+    }
   }
   paste(html: string, target?: LocatorSpec): Promise<void> { return pasteHtml(this.page, html, target); }
   verify(expectation?: Expectation): Promise<Verification> { return verify(this.page, expectation); }

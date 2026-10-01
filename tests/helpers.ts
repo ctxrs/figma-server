@@ -2,10 +2,11 @@ import { randomUUID } from 'node:crypto';
 import { mkdtemp, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { BrowserBackend, BrowserTab, AccountStatus } from '../src/browser-supervisor.js';
+import { chromium, type BrowserContext } from 'playwright';
+import { BrowserSupervisor, type BrowserBackend, type BrowserTab, type AccountStatus } from '../src/browser-supervisor.js';
 import { Core } from '../src/core.js';
 import { fault } from '../src/errors.js';
-import type { Expectation, LocatorSpec } from '../src/security.js';
+import type { Expectation, LocatorSpec, ImagePayload } from '../src/security.js';
 import { State, Metadata } from '../src/state.js';
 
 export const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jPqkAAAAASUVORK5CYII=', 'base64');
@@ -31,6 +32,7 @@ export class FakeTab implements BrowserTab {
   async keypress(_keys: string): Promise<void> { this.operations.push('keypress'); }
   async drag(_from: { x: number; y: number }, _to: { x: number; y: number }): Promise<void> { this.operations.push('drag'); }
   async paste(_html: string, _target?: LocatorSpec): Promise<void> { this.operations.push('paste'); }
+  async uploadImage(_image: ImagePayload, _trigger: LocatorSpec, _signal?: AbortSignal): Promise<void> { await this.block; await this.check(); this.operations.push('upload'); }
   async verify(expected?: Expectation): Promise<{ status: 'verified' | 'unverified'; saveState: 'saved'; checks: string[] }> {
     return { status: expected ? 'verified' : 'unverified', saveState: 'saved', checks: expected ? ['visibility', 'saved'] : [] };
   }
@@ -74,3 +76,18 @@ export async function open(core: Core, session: string, file = 'abcdef123', mode
 }
 export const locator: LocatorSpec = { by: 'role', role: 'button', name: 'Draw' };
 export async function tick(): Promise<void> { await new Promise(resolve => setTimeout(resolve, 10)); }
+
+export async function editorFixture(html: string, headed = false): Promise<{ core: Core; state: State; context: () => BrowserContext; cleanup: () => Promise<void> }> {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'figma-editor-fixture-')));
+  const state = new State(root);
+  await state.init({ version: 1, browser: process.env.FIGMA_SERVER_TEST_BROWSER, accounts: [{ name: 'default', loginOrigins: [] }] });
+  let context!: BrowserContext;
+  const launcher: typeof chromium.launchPersistentContext = async (profile, options) => {
+    context = await chromium.launchPersistentContext(profile, { ...options, headless: !headed });
+    await context.route('**/*', route => route.fulfill({ contentType: 'text/html', body: html }));
+    return context;
+  };
+  const browser = new BrowserSupervisor(state, await state.config(), launcher);
+  const core = new Core(browser, state, await Metadata.open(state));
+  return { core, state, context: () => context, cleanup: async () => { await core.stop(); await rm(root, { recursive: true, force: true }); } };
+}

@@ -2,17 +2,18 @@ import { setTimeout as delay } from 'node:timers/promises';
 import type { BrowserBackend } from './browser-supervisor.js';
 import { publicError, Fault, fault } from './errors.js';
 import { Artifacts, type Receipt } from './receipts.js';
-import { LIMITS, safeHtml, type Expectation } from './security.js';
+import { LIMITS, safeHtml, suppliedImage, type Expectation } from './security.js';
 import { SessionManager, type Lease } from './session-manager.js';
 import { Metadata, State } from './state.js';
 import { parseTool, type ToolInput, type ToolName } from './tools.js';
 
-const writes = new Set<ToolName>(['figma.click', 'figma.pointer_click', 'figma.type_text', 'figma.wheel', 'figma.fill', 'figma.keypress', 'figma.drag', 'figma.paste_html']);
+const writes = new Set<ToolName>(['figma.click', 'figma.pointer_click', 'figma.type_text', 'figma.wheel', 'figma.fill', 'figma.keypress', 'figma.drag', 'figma.paste_html', 'figma.upload_image']);
 export class Core {
   readonly sessions: SessionManager;
   readonly artifacts: Artifacts;
   private readonly active = new Set<Promise<unknown>>();
   private stopping = false;
+  private uploads = 0;
   constructor(readonly browser: BrowserBackend, readonly state: State, readonly metadata: Metadata) {
     this.sessions = new SessionManager(browser, metadata);
     this.artifacts = new Artifacts(state);
@@ -45,15 +46,38 @@ export class Core {
         await this.artifacts.read(session, input.job_id, input.file);
         return { artifact: `artifacts/${input.job_id}/${input.file}`, kind: 'rendered_png' };
       }
+      case 'figma.upload_image': {
+        const input = parsed.input as ToolInput<'figma.upload_image'>;
+        this.sessions.get(session, input.lease, true);
+        if (this.uploads >= LIMITS.uploads) fault('upload_limit', 'Image upload capacity is unavailable.', 429);
+        this.uploads++;
+        let operation: Promise<void> | undefined;
+        const release = () => { this.uploads--; };
+        try {
+          const image = suppliedImage(input.filename, input.data_base64);
+          return await this.receipt(session, parsed.name, input.lease, input.expectation, lease => {
+            if (!lease.tab.uploadImage) fault('upload_unsupported', 'This browser adapter does not support image upload.', 409);
+            operation = lease.tab.uploadImage(image, input.trigger, signal);
+            return operation;
+          }, signal);
+        } finally {
+          // Cancellation may return before browser work settles. Keep its bytes
+          // within the upload cap even while a failed close quarantines the page.
+          if (operation) void operation.then(release, release); else release();
+        }
+      }
     }
     const value = parsed.input as { lease: string; expectation?: Expectation };
     if (writes.has(parsed.name) || parsed.name === 'figma.verify') {
       return this.receipt(session, parsed.name, value.lease, value.expectation, async lease => {
         switch (parsed.name) {
-          case 'figma.click': await lease.tab.click((parsed.input as ToolInput<'figma.click'>).locator); break;
+          case 'figma.click': {
+            const input = parsed.input as ToolInput<'figma.click'>;
+            await lease.tab.click(input.locator, input.modifiers); break;
+          }
           case 'figma.pointer_click': {
             const input = parsed.input as ToolInput<'figma.pointer_click'>;
-            await lease.tab.pointerClick(input.point, input.clicks, input.button); break;
+            await lease.tab.pointerClick(input.point, input.clicks, input.button, input.modifiers); break;
           }
           case 'figma.type_text': await lease.tab.typeText((parsed.input as ToolInput<'figma.type_text'>).text); break;
           case 'figma.wheel': {
@@ -67,7 +91,7 @@ export class Core {
           case 'figma.keypress': await lease.tab.keypress((parsed.input as ToolInput<'figma.keypress'>).keys); break;
           case 'figma.drag': {
             const input = parsed.input as ToolInput<'figma.drag'>;
-            await lease.tab.drag(input.from, input.to); break;
+            await lease.tab.drag(input.from, input.to, input.modifiers); break;
           }
           case 'figma.paste_html': {
             const input = parsed.input as ToolInput<'figma.paste_html'>;

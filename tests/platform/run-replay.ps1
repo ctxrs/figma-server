@@ -14,6 +14,8 @@ try {
     Set-Location $PSScriptRoot
     $runtimes = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'windows-runtimes.json') | ConvertFrom-Json
     $candidate = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'candidate.json') | ConvertFrom-Json
+    $suite = if ($candidate.suite) { $candidate.suite } else { 'full' }
+    if ($suite -notin @('full', 'primitives')) { throw 'Unknown qualification suite' }
     $archive = Join-Path $PSScriptRoot $candidate.filename
     if ((Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant() -ne $candidate.sha256) {
         throw 'Candidate archive checksum mismatch'
@@ -38,15 +40,18 @@ try {
             Invoke-Node -Node $node -Arguments @($playwright, 'install', '--no-shell', 'chromium')
         }
         $output = Join-Path $PSScriptRoot ("evidence-node" + $runtime.major)
-        Invoke-Node -Node $node -Arguments @((Join-Path $PSScriptRoot 'scripts\qualify.mjs'), '--archive', $archive, '--output', $output)
+        Invoke-Node -Node $node -Arguments @((Join-Path $PSScriptRoot 'scripts\qualify.mjs'), '--archive', $archive, '--suite', $suite, '--output', $output)
         $report = Get-Content -Raw -LiteralPath (Join-Path $output 'qualification.json') | ConvertFrom-Json
-        $browser = Get-Content -Raw -LiteralPath (Join-Path $output 'browser.json') | ConvertFrom-Json
-        $launcher = Get-Content -Raw -LiteralPath (Join-Path $output 'launcher.json') | ConvertFrom-Json
-        $acl = Get-Content -Raw -LiteralPath (Join-Path $output 'windows-acl.json') | ConvertFrom-Json
-        $api = Get-Content -Raw -LiteralPath (Join-Path $output 'api.json') | ConvertFrom-Json
+        $names = @('primitives', 'login-deadline')
+        if ($suite -eq 'full') { $names += @('browser', 'launcher', 'windows-acl', 'api') }
+        $details = @{}
+        foreach ($name in $names) {
+            $details[$name] = Get-Content -Raw -LiteralPath (Join-Path $output ($name + '.json')) | ConvertFrom-Json
+        }
         $reports += [PSCustomObject]@{ platform = $report.platform; arch = $report.arch; osRelease = $report.osRelease;
-            node = $report.node; status = $report.status; package = $report.package;
-            browser = $browser; launcher = $launcher; windowsAcl = $acl; api = $api;
+            node = $report.node; status = $report.status; package = $report.package; suite = $suite;
+            browser = $details['browser']; launcher = $details['launcher']; windowsAcl = $details['windows-acl']; api = $details['api'];
+            primitives = $details['primitives']; loginDeadline = $details['login-deadline'];
             steps = $report.steps; liveFigma = $report.liveFigma }
     }
     Write-Output 'FIGMA_WINDOWS_QUALIFICATION'

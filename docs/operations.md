@@ -57,6 +57,13 @@ headlessly to check persistence. A signed-in dashboard can produce
 `authenticated_unverified`; opening a real file checks editor access and can
 produce `ready`. Neither state alone proves that an edit saved.
 
+Login has a local ten-minute confirmation deadline, whether the daemon is
+running or the CLI owns the browser directly. On timeout, the CLI closes the
+pending prompt, completes its cleanup attempt, and exits without waiting for
+Enter. Run `status` or `doctor`, follow any cleanup warning, then start `login`
+again when ready to sign in. A timeout is not a successful login, even if the
+browser window opened.
+
 No personal access token or probe URL is needed for the default flow. A
 publicly shared file can still require a Figma account. An HTTP error from
 Figma, including a CDN block, does not establish that authentication is missing.
@@ -78,15 +85,16 @@ installed executable path if it cannot find `figma-server`, and make sure
 Node.js is also available to that process.
 
 On Windows, a client may need to launch npm's `.cmd` shim through `cmd.exe`.
-This configuration is a launcher template; the actual global npm shim and
-desktop MCP client path still need qualification:
+The local/global shim path passed native fixtures using `cmd.exe /d /s /c`.
+Use this launcher template; your desktop MCP client's launch path still needs
+its own check:
 
 ```json
 {
   "mcpServers": {
     "figma-local": {
       "command": "cmd.exe",
-      "args": ["/d", "/c", "figma-server", "mcp"]
+      "args": ["/d", "/s", "/c", "figma-server", "mcp"]
     }
   }
 }
@@ -150,16 +158,38 @@ For an earlier editor check, add optional `probeUrl` to the account with a real
 file URL it can access, or set it on first initialization with
 `figma-server init --probe-url URL`. If state already exists, edit `config.json`
 while the daemon is stopped; repeating `init` does not replace its probe URL.
-Reaching a sign-in page is not enough. For SSO, approved login origins must be
-exact HTTPS origins, such as `https://login.example.com`. Add only those used by
-your sign-in flow to the account's `loginOrigins` list while the daemon is
-stopped, then restart and run `login`. Extra login origins apply to the headed
-sign-in flow, not ordinary agent editor navigation.
+Reaching a sign-in page is not enough.
 
 A system browser is recorded in the optional top-level `browser` field.
 Use `init --browser` to set it and resolve executable symlinks. Otherwise
 the service uses Playwright's Chromium. It always uses its dedicated profile;
 there is no command to attach your daily Chrome profile.
+
+## Google and enterprise SSO
+
+Headed login permits Figma and the account's configured `loginOrigins` only.
+The default list is empty, so navigation to Google or an enterprise identity
+provider is blocked until you configure its exact origin.
+
+Stop the daemon with Ctrl+C and edit `config.json` in the
+[state directory](#state-and-configuration). Update the chosen account's
+`loginOrigins` field inside `accounts`, preserving its other settings. For
+users who choose Google sign-in, the account fragment is:
+
+```json
+{"loginOrigins": ["https://accounts.google.com"]}
+```
+
+For enterprise SSO, enter the exact HTTPS origin of your organization's sign-in
+provider: the scheme and hostname, without a path or wildcard. For example, if
+your provider's sign-in URL is `https://sso.your-company.example/login`, use
+`https://sso.your-company.example`; replace this illustrative hostname with the
+actual provider origin. Add only origins needed by your chosen sign-in flow.
+
+Restart `figma-server run`, then run `figma-server login` in the other terminal.
+These extra origins apply only to the headed human login, not agent navigation
+or headless file access. Configuration does not establish that a provider flow
+has been tested; Google and enterprise SSO compatibility remains unverified.
 
 ## Profile ownership and recovery
 
@@ -186,8 +216,11 @@ lock can permit two processes to open the profile.
 
 On Unix, state directories are set to mode 0700 and state files require 0600.
 The implementation rejects linked state paths and some alternate path layouts.
-These checks do not establish equivalent Windows ACL protections; keep state
-private with the operating system's account permissions.
+On Windows, private state paths receive protected NTFS ACLs granting the
+current account access. The native fixture pass used an elevated lab token;
+ordinary-user setup remains unverified. These checks do not isolate clients
+running as the same OS user or protect against trusted administrators. See the
+[recorded qualification scope](TESTING.md#recorded-native-qualification-2026-10-01).
 
 Keep the daemon in the foreground for the first run. After a crash, inspect
 status and existing processes before restarting. A persisted browser profile
@@ -238,5 +271,6 @@ a raw Chromium debugging endpoint.
 | `status` reports a stopped daemon | Keep `figma-server run` open in another terminal. The MCP proxy does not start it. |
 | A profile is already in use | Check the running daemon/login process and `daemon.lock`; do not remove a live lock. |
 | Figma sign-in succeeds but the file is inaccessible | Check the file URL, account, sharing permissions, and SSO flow. |
+| Login times out or its browser closes before confirmation | Check `status`/`doctor`, follow the CLI cleanup message, and start `login` again. Do not count the timed-out attempt as authenticated. |
 | An artifact is missing | It may have been pruned by age or storage budget. |
 | An edit is unverified or a request disconnects | Inspect the file and available evidence before repeating the edit. |

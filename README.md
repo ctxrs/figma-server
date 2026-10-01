@@ -4,8 +4,9 @@ Give your agent a dedicated Figma browser.
 
 `figma-server` connects an MCP agent to the Figma web editor through a local
 Chromium session. The agent can inspect the visible editor, take screenshots,
-and send clicks, text, keyboard shortcuts, and drags. Sign in through the
-browser; its dedicated profile reuses the session between runs until Figma
+and send clicks, text, keyboard shortcuts, and drags. It can hold modifiers for
+a gesture and supply PNG/JPEG bytes to an editor file chooser. Sign in through
+the browser; its dedicated profile reuses the session between runs until Figma
 requires sign-in again.
 
 Connect through MCP stdio, or call the JSON HTTP API from your own tooling.
@@ -25,9 +26,11 @@ Chromium is installed in the next step.
 **v0.1.0 release candidate:** the URL below is the planned GitHub release asset.
 The asset is not yet published; the install command becomes usable when the
 release is available. This is an npm-format archive, not a package published
-to the npm registry. The CLI workflow and native browser fixtures have passed
-on Linux, macOS, and Windows in the tested configurations. Real authenticated
-Figma editing remains unverified. See the
+to the npm registry. Recorded CLI and native browser fixtures have passed
+on Linux, macOS, and Windows in the tested configurations; those results apply
+to the recorded candidate archives. The new primitives have passed source
+checks; their native qualification is in progress. Real authenticated Figma
+editing remains unverified. See the
 [tested Node/browser configurations and validation boundaries](docs/TESTING.md).
 
 ```sh
@@ -49,6 +52,8 @@ figma-server run
 
 Keep `run` open. It owns the browser profile and listens on
 `http://127.0.0.1:4317`. Stop it with Ctrl+C when finished.
+
+Before Google or enterprise SSO login, [configure the exact provider origins](docs/operations.md#google-and-enterprise-sso) and restart the daemon.
 
 In terminal 2:
 
@@ -102,6 +107,16 @@ For a first edit, use a disposable design file with edit access:
 > Inspect the result and take a screenshot. Check the save indicator, then
 > reload the file and check the text again. Release the file when done. If
 > anything is unverified, stop and show me what you observed.
+
+To try an image, supply a PNG or JPEG to your agent:
+
+> Open this disposable file and find its image file chooser. Upload the supplied
+> image bytes, inspect the result, and take a screenshot. Check saving and
+> reopen the file before reporting success; tell me what remains unverified.
+
+The upload tool delivers bytes to the chooser; insertion into the Figma document
+and saving need separate checks. See the
+[image and gesture examples](docs/agent-tools.md#supplying-an-image).
 
 The agent keeps a short-lived lease while working in its tab. A writer lease
 serializes this server's edits to the same file, and the agent releases it when

@@ -12,12 +12,13 @@ for (let index = 0; index < arguments_.length; index += 2) {
   const key = arguments_[index];
   const value = arguments_[index + 1];
   if (!allowed.has(key) || !value || value.startsWith('--')) {
-    throw new Error('Usage: node scripts/qualify.mjs [--output DIRECTORY] [--system-browser ABSOLUTE_PATH] [--archive NPM_TARBALL] [--suite full|launcher]');
+    throw new Error('Usage: node scripts/qualify.mjs [--output DIRECTORY] [--system-browser ABSOLUTE_PATH] [--archive NPM_TARBALL] [--suite full|launcher|primitives]');
   }
   options[key] = value;
 }
 const suite = options['--suite'] ?? 'full';
-if (!['full', 'launcher'].includes(suite)) throw new Error('Unknown qualification suite. Use full or launcher.');
+if (!['full', 'launcher', 'primitives'].includes(suite)) throw new Error('Unknown qualification suite. Use full, launcher or primitives.');
+if (suite === 'primitives' && !options['--archive']) throw new Error('Focused primitives qualification requires --archive; do not pack a changing source snapshot.');
 const output = options['--output'] ? resolve(options['--output']) : await mkdtemp(join(tmpdir(), 'figma-qualification-'));
 await mkdir(output, { recursive: true });
 const work = await mkdtemp(join(tmpdir(), 'figma-package-smoke-'));
@@ -61,7 +62,9 @@ try {
   step('install tarball without development dependencies', () => runNode([npm, 'install', '--ignore-scripts', '--omit=dev', '--no-audit', '--no-fund', tarball], { cwd: consumer, env }));
   const installed = join(consumer, 'node_modules', '@ctxrs', 'figma-server');
   const testEnv = { ...env, QUALIFY_PACKAGE_ROOT: installed, QUALIFY_CONSUMER: consumer, QUALIFY_ARCHIVE: tarball };
-  step('installed local and task-owned global npm launchers and stdio', () => runNode(['--test', join(repositoryRoot, 'tests/platform/launcher.test.mjs')], { cwd: consumer, env: testEnv }));
+  if (suite !== 'primitives') {
+    step('installed local and task-owned global npm launchers and stdio', () => runNode(['--test', join(repositoryRoot, 'tests/platform/launcher.test.mjs')], { cwd: consumer, env: testEnv }));
+  }
   if (suite === 'full') {
     if (platform() === 'win32') {
       step('native NTFS owner-only ACL enforcement and rejection cases', () => runNode(['--test', join(repositoryRoot, 'tests/platform/windows-acl.test.mjs')], { cwd: consumer, env: testEnv }));
@@ -73,11 +76,15 @@ try {
       step('installed headed login fixture and headless reopen', () => runNode(['--test', join(repositoryRoot, 'tests/platform/headed.test.mjs')], { cwd: consumer, env: testEnv }));
     }
   }
+  if (suite === 'full' || suite === 'primitives') {
+    step('installed upload, held modifiers and stdio frame limits with real Chromium', () => runNode(['--test', join(repositoryRoot, 'tests/platform/primitives.test.mjs')], { cwd: consumer, env: testEnv, timeout: 270_000 }));
+    step('installed independent login deadlines with stdin open', () => runNode(['--test', join(repositoryRoot, 'tests/platform/login-deadline.test.mjs')], { cwd: consumer, env: testEnv }));
+  }
   report.status = 'passed';
 } catch (error) {
   report.status = 'failed';
   process.stderr.write(`Qualification failed: ${error.message}\n`);
-  if (suite === 'full' && platform() === 'linux' && !options['--system-browser']) {
+  if (suite !== 'launcher' && platform() === 'linux' && !options['--system-browser']) {
     process.stderr.write('If Chromium reports "No usable sandbox", keep sandboxing enabled. On a host with working system Chrome, retry qualification with --system-browser /usr/bin/google-chrome. For a fresh app setup the supported configuration is figma-server init --browser /absolute/path/to/chrome. This is an explicit alternative mode, not a bundled-browser pass.\n');
   }
   process.exitCode = 1;

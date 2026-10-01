@@ -57,7 +57,7 @@ async function fixtureRoute(route) {
     return route.abort('blockedbyclient');
 }
 
-export async function launchFixture(profile, options) {
+export async function launchFixture(profile, options, routeHandler = fixtureRoute) {
   let context;
   try { context = await chromium.launchPersistentContext(profile, options); }
   catch (error) {
@@ -69,8 +69,8 @@ export async function launchFixture(profile, options) {
   // Install per-page interception before the supervisor's startup dashboard.
   // Only exact Figma fixture requests are fulfilled; external requests still
   // reach the production navigation guard. No real Figma server is contacted.
-  context.on('page', page => { void page.route('https://www.figma.com/**', fixtureRoute); });
-  for (const page of context.pages()) await page.route('https://www.figma.com/**', fixtureRoute);
+  context.on('page', page => { void page.route('https://www.figma.com/**', routeHandler); });
+  for (const page of context.pages()) await page.route('https://www.figma.com/**', routeHandler);
   return context;
 }
 

@@ -189,10 +189,121 @@ No account, privilege or machine-policy changes were made.
 Two earlier attempts timed out before disk admission. Native receipt
 `req-42f6926c33ff4ec0` then failed an overly strict browser-descendant owner
 assertion; this was resolved by a reviewed harness correction, not a production
-fix. Both failed and passing receipts are retained outside the checkout under
-`/tmp/figma-final-native.M60zOM`; the passing summary is
-`descendant-audit-replay/windows-qualification.json`. These results qualify f75's
+fix. Both failed and passing receipts are retained outside the checkout; the
+passing summary is `windows-qualification.json`. These results qualify f75's
 Windows ACL/launcher behavior, not a later archive or live Figma editing.
+
+## Focused upload/modifier qualification: 2026-10-01
+
+The coherent candidate is SHA-256
+`1c0e8505fccbb3b51272c7461ecf3c1086301676ab8356243aeebafeed29d910`,
+89,979 bytes and 45 package files. Source qualification independently passed
+101/101 tests without skips. Its archive and 28 source/compiled-code/manifest
+hashes are retained in the private qualification manifest `candidate.json`;
+compiled JavaScript in the archive matched the frozen build. The focused runner
+requires `--archive`, installs production dependencies and does not rebuild,
+repack, or repeat the baseline CLI/crash/auth matrix.
+
+| Native environment | Node | Actual browser | Focused result |
+| --- | --- | --- | --- |
+| Ubuntu 24.04.4, x64 | 22.22.2 and 24.21.0 | System Chrome 150.0.7871.124, sandbox enabled | Each runtime passed three qualification steps and two tests, zero failures/skips. `ControlOrMeta` resolved to Control. |
+| macOS 26.2 (25C56), ARM64 | 22.22.2 | System Chrome 154.0.8037.92, sandbox enabled | Three qualification steps and two tests passed, zero failures/skips. `ControlOrMeta` resolved to Meta. |
+| Windows x64 | Planned 22.23.3 and 24.21.0 | Planned full bundled Chromium | Blocked before execution: replay `req-5161cadfa4c54fc9` timed out after five minutes awaiting disk admission. No new Windows feature tests ran. |
+
+Passing receipts are `linux-node22-receipt.json`, `linux-node24-receipt.json`
+and `macos-receipt.json`, retained outside the checkout.
+The macOS raw log and cleanup receipt are retained in `macos/`: native exit 0,
+no remaining task browser processes. Its temporary remote root was removed
+only after verifying all eight retained success/failure proof-file hashes.
+Earlier baseline digests do not qualify these new features.
+
+The Windows sealed receipt is exit 70 with zero guest-output bytes; the outer
+replay command exited 75. This is an admission failure, not a product test
+failure or a skipped pass. Its receipt is retained in `windows-admission-receipt.json`
+and the governed log in `windows-replay-runner.log`. After reviewed cleanup of
+two completed task-owned overlays, the 20:56:12 UTC snapshot still had
+106,616,532,992 free bytes against the unchanged 107,374,182,400-byte minimum.
+Original sealed bundles and success/failure receipts remain retained separately.
+New Windows upload/modifier/stdio/deadline qualification remains pending;
+the earlier f75 elevated-token ACL/launcher pass retains its narrower scope.
+
+The focused suite runs two tests:
+
+- Real headless Chromium through installed Core, HTTP and the actual local npm
+  stdio shim: PNG/JPEG hashes and tab isolation, unsafe filenames rejected before
+  screenshots/chooser effects, held click/drag modifiers, release after an
+  interrupted drag, and `ControlOrMeta` resolving to Meta on macOS or Control on
+  Windows/Linux. A genuine PNG frame larger than 128 KiB must upload successfully;
+  an oversized ordinary frame must be rejected without effects. After the client
+  closes stdin, successful EOF exit 0 and rejected-frame exit 1 must be natural,
+  with owned sessions/leases cleaned. Error exit with stdin still open is not
+  claimed; the independent login-deadline test retains that stricter gate.
+- Installed `runCli` in independent child processes: short local and backend
+  login deadlines, real readline and stdin left open without Enter/EOF, natural
+  exit, input-listener removal, and lock/daemon cleanup. Only the TTY gate and
+  deadlines are injected; the login backend is inert. This is not GUI sign-in.
+
+All passing rows accepted a real 301,493-byte PNG MCP frame and checked PNG/JPEG
+file hashes, tab isolation and cleanup. This is not an 8 MiB native-upload claim.
+The deadline test has two child modes, offline and daemon; those are assertions
+within one test, not two additional tests. Both exited naturally with stdin
+open and no remaining readline data listeners. An initial Linux attempt wrongly
+required ordinary-frame rejection to exit with stdin open; the corrected harness
+closes stdin after rejection, preserving the stricter open-stdin login gate.
+An initial macOS attempt rejected its staging directory's copied mode 0775;
+only that owned directory was corrected to 0700 before the passing run.
+Both failed reports remain retained; neither correction changed product code.
+
+Windows additionally audits current-SID ownership and protected DACLs on state,
+profile, SQLite, upload receipts and PNGs, recording the actual token type. Use
+full bundled Chromium with its sandbox enabled. Expected lab coverage remains
+the elevated token; ordinary non-admin setup is unproven. macOS must record
+`arch: arm64` and actual system Chrome; its mouse events must show Meta rather
+than Control. Linux uses a real headless browser; no graphical login is needed
+for the independent deadline fixture. Fixed port 4317 must be free.
+
+A bounded standard-token Windows probe was assessed but not executed because
+no guest was admitted. The existing loaded-profile launcher targets its current
+provisioned account; it does not directly launch a new standard account. Any
+optional follow-up needs an isolated guest-only launcher, `IsAdmin=false`,
+current-SID private ACLs, one native Chromium upload and the independent CLI
+deadline. Ordinary-user support remains unproven; this is not an additional
+broad release matrix or permission to change machine policy/operator profiles.
+
+After source/archive admission, run Linux and macOS separately:
+
+```sh
+# Linux: working sandboxed system Chrome on the governed host.
+ctx-build-governor exec -- node scripts/qualify.mjs \
+  --archive /absolute/path/coherent-candidate.tgz --suite primitives \
+  --system-browser /usr/bin/google-chrome --output /tmp/figma-primitives-linux
+
+# Native macOS ARM64 owner: verify uname -m is arm64 before running.
+node scripts/qualify.mjs --archive /absolute/path/coherent-candidate.tgz \
+  --suite primitives \
+  --system-browser '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' \
+  --output /tmp/figma-primitives-macos
+```
+
+The Windows builder accepts `--suite primitives` and the replay entry uses that
+selection for both verified Node runtimes. The current sealed bundle is
+`windows-qualification.tar`, retained outside the checkout,
+SHA-256 `3e1de63550a3e9049a9368152d65d74ba5109b09d87ea8eeef9b4fbac48354f6`.
+Do not invoke qualification before source admission:
+
+```sh
+ctx-build-governor exec -- node scripts/qualify-windows-bundle.mjs \
+  /absolute/path/coherent-candidate.tgz /tmp/figma-primitives-windows --suite primitives
+```
+
+Use the governed request/replay/feedback commands below with its sealed digest.
+Require exit 0, untruncated output and explicit Node pass summaries containing
+`primitives` and `loginDeadline`. Linux/macOS evidence is `qualification.json`,
+`primitives.json` and `login-deadline.json`; retain archive SHA and actual OS,
+architecture, Node, browser and token scope. No native evidence is created by
+syntax checks. These fixtures do not prove authenticated Figma image placement,
+held-modifier UI compatibility, or persisted native edits; human login remains
+required for that separate gate.
 
 ## Governed Windows replay
 
@@ -244,4 +355,8 @@ On this operator installation, `STATE_DIRECTORY` is `/var/lib/ctx-lab`; consult
 the installed configuration rather than assuming this path elsewhere. Admission
 failure or unavailable billing is infrastructure evidence, not a product-test
 pass. Do not relax thresholds, bypass the governor, or delete another task's
-proofs. macOS replay is separately owned; do not duplicate it.
+proofs. Physical macOS SSH qualification also belongs in the governor's `remote`
+lane: its command accepts the bounded SSH runner without consuming a local
+heavy slot. Local Linux browser execution and local bundle construction use
+the heavy `exec` lane. Keep private staging ancestry owner-only: copying a
+directory's group-writable mode can correctly trigger `untrusted_ancestry`.

@@ -14,7 +14,7 @@ import { BrowserSupervisor, type BrowserBackend } from './browser-supervisor.js'
 import { Core } from './core.js';
 import { Fault, fault, publicError } from './errors.js';
 import { serve } from './main.js';
-import { accountName } from './security.js';
+import { accountName, LIMITS } from './security.js';
 import { defaultRoot, Metadata, privateFile, State, type Config } from './state.js';
 import { DAEMON_URL, stdioProxy } from './proxy.js';
 
@@ -44,6 +44,7 @@ export type CliOptions = {
   // Tests inject state and a browser backend; production paths and ownership stay fixed.
   browser?: (state: State, config: Config) => BrowserBackend;
   confirm?: () => Promise<void>;
+  confirmationMs?: number;
 };
 
 function missing(error: unknown): boolean { return (error as NodeJS.ErrnoException)?.code === 'ENOENT'; }
@@ -258,29 +259,33 @@ async function login(state: State, account: string, options: CliOptions, output:
   if (!options.confirm && !(input as NodeJS.ReadStream).isTTY) {
     fault('interactive_login_required', `Login needs a human terminal. Run figma-server login --account ${account} in a graphical desktop terminal; sign in in the browser.`);
   }
-  const confirm = options.confirm ?? (async () => {
+  const confirm = options.confirm ?? (async (signal?: AbortSignal) => {
     const prompt = createInterface({ input, output });
     let onClose!: () => void;
     const closed = new Promise<never>((_, reject) => {
       onClose = () => reject(new Fault('login_interrupted', 'Login terminal closed before confirmation. Run figma-server login again.'));
       prompt.once('close', onClose);
     });
-    try { await Promise.race([prompt.question('Finish signing in in the browser, then press Enter here: ', { signal: options.signal }), closed]); }
+    try { await Promise.race([prompt.question('Finish signing in in the browser, then press Enter here: ', { signal }), closed]); }
     finally { prompt.off('close', onClose); prompt.close(); }
   });
-  // Reject confirmation on signal so the supervisor closes its headed worker.
+  // The daemon cannot push an expired login to a terminal waiting for Enter.
+  // Start a local deadline only when the browser is ready for the human.
   const confirmation = async (): Promise<void> => {
     output.write('Sign in only in the dedicated browser window. Never enter a password in this terminal.\n');
-    if (!options.signal) return confirm();
-    options.signal.throwIfAborted();
+    const deadline = new AbortController();
+    const signal = AbortSignal.any([deadline.signal, ...(options.signal ? [options.signal] : [])]);
+    const timer = setTimeout(() => deadline.abort(new Fault('login_timeout', 'Login timed out. Run figma-server login again to retry.', 409)), options.confirmationMs ?? LIMITS.loginMs);
     let abort!: () => void;
     try {
+      signal.throwIfAborted();
       const cancelled = new Promise<never>((_, reject) => {
-        abort = () => reject(options.signal!.reason);
-        options.signal!.addEventListener('abort', abort, { once: true });
+        abort = () => reject(signal.reason);
+        signal.addEventListener('abort', abort, { once: true });
       });
-      await Promise.race([cancelled, confirm()]);
-    } finally { options.signal.removeEventListener('abort', abort); }
+      await Promise.race([cancelled, confirm(signal)]);
+      signal.throwIfAborted();
+    } finally { clearTimeout(timer); signal.removeEventListener('abort', abort); }
   };
   try {
     await request(state, '/api/status', { signal: options.signal });
@@ -349,7 +354,17 @@ export async function runCli(args: string[], options: CliOptions = {}): Promise<
       case 'doctor': return await doctor(state, stdout, options.signal);
       case 'status': await state.config(); showAccounts(await request(state, '/api/status', { signal: options.signal }), stdout); break;
       case 'run': await run(state, options, stderr); break;
-      case 'login': await login(state, accountName.parse(values.account ?? 'default'), options, stderr); break;
+      case 'login': {
+        const confirmation = new AbortController();
+        const signal = options.signal ? AbortSignal.any([options.signal, confirmation.signal]) : confirmation.signal;
+        try { await login(state, accountName.parse(values.account ?? 'default'), { ...options, signal }, stderr); }
+        finally {
+          // A backend deadline can win its Promise.race while readline still
+          // awaits Enter. Release that question and its stdin handle on any exit.
+          confirmation.abort();
+        }
+        break;
+      }
       case 'mcp': await stdioProxy(state, { ...options, stdin: options.stdin, stdout, stderr }); break;
     }
     return 0;

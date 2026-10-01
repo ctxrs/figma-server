@@ -6,7 +6,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough, Writable } from 'node:stream';
 import { test } from 'node:test';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { crc32 } from 'node:zlib';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { runCli, type CliOptions } from '../src/cli.js';
@@ -14,10 +15,19 @@ import { Core } from '../src/core.js';
 import { Fault } from '../src/errors.js';
 import { serve } from '../src/main.js';
 import { DAEMON_URL, stdioProxy } from '../src/proxy.js';
+import { LIMITS } from '../src/security.js';
 import { Metadata, State } from '../src/state.js';
-import { FakeBrowser } from './helpers.js';
+import { FakeBrowser, PNG } from './helpers.js';
 
 const cliPath = fileURLToPath(new URL('../src/cli.js', import.meta.url));
+function paddedPng(size: number): Buffer {
+  const chunk = Buffer.alloc(size - PNG.length, 97);
+  chunk.writeUInt32BE(chunk.length - 12);
+  chunk.write('tEXt', 4);
+  chunk.write('note\0', 8);
+  chunk.writeUInt32BE(crc32(chunk.subarray(4, -4)), chunk.length - 4);
+  return Buffer.concat([PNG.subarray(0, -12), chunk, PNG.subarray(-12)]);
+}
 function capture(): { stream: Writable; text: () => string } {
   let value = '';
   return { stream: new Writable({ write(chunk, _encoding, done) { value += chunk.toString(); done(); } }), text: () => value };
@@ -242,6 +252,189 @@ test('interrupted offline login tears down the browser; failed teardown retains 
   await assert.rejects(state.lock(), { code: 'daemon_locked' });
 });
 
+for (const mode of ['deadline', 'human', 'http-fault', 'signal'] as const) {
+  test(`interactive login exits naturally with stdin open after ${mode}`, { skip: mode === 'signal' && process.platform === 'win32' }, async t => {
+    const home = await isolated(t);
+    const cliUrl = pathToFileURL(cliPath).href;
+    const source = `
+      import { BrowserSupervisor } from ${JSON.stringify(new URL('./browser-supervisor.js', cliUrl).href)};
+      import { State, defaultRoot } from ${JSON.stringify(new URL('./state.js', cliUrl).href)};
+      import { Fault } from ${JSON.stringify(new URL('./errors.js', cliUrl).href)};
+      const mode = ${JSON.stringify(mode)};
+      const state = new State(defaultRoot());
+      await state.init({ version: 1, accounts: [{ name: 'default', loginOrigins: [] }] });
+      const token = await state.secret();
+      globalThis.fetch = async (url, init) => {
+        if (mode !== 'http-fault') {
+          const error = new Error('fixture offline');
+          error.cause = { code: 'ECONNREFUSED' };
+          throw error;
+        }
+        if (new Headers(init.headers).get('Authorization') !== 'Bearer ' + token) throw new Error('missing authentication');
+        const path = new URL(url).pathname;
+        const json = (value, status = 200) => new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } });
+        if (path === '/api/status') return json({ accounts: [{ account: 'default', state: 'ready' }] });
+        if (path === '/api/login/start') return json({ login: '00000000-0000-4000-8000-000000000001' }, 202);
+        if (path === '/api/login/confirm') return json({ error: { code: 'login_timeout' } }, 409);
+        if (path === '/api/login/cancel') {
+          process.stderr.write('CANCEL_AWAITED\\n');
+          return json({ cancelled: true, account: 'default', status: { account: 'default', state: 'stopped' } });
+        }
+        throw new Error('unexpected endpoint');
+      };
+      BrowserSupervisor.prototype.login = async function(account, confirm) {
+        let timer;
+        try {
+          return await Promise.race([
+            confirm().then(() => {
+              process.stderr.write('HUMAN_CONFIRMED\\n');
+              return { account, state: 'authenticated_unverified' };
+            }),
+            new Promise((_, reject) => {
+              timer = setTimeout(() => reject(new Fault('login_timeout', 'Login deadline expired.')), mode === 'deadline' ? 40 : 5000);
+            }),
+          ]);
+        } finally { clearTimeout(timer); }
+      };
+      BrowserSupervisor.prototype.stop = async function() { process.stderr.write('BROWSER_STOPPED\\n'); };
+      // A real child stdin pipe stays open. Only the TTY gate is injected so
+      // this uses the actual readline question, not an options.confirm stub.
+      process.stdin.isTTY = true;
+      process.argv = [process.execPath, ${JSON.stringify(cliPath)}, 'login'];
+      await import(${JSON.stringify(cliUrl)});
+      process.stderr.write('CLI_RETURNED ' + JSON.stringify({ code: process.exitCode, paused: process.stdin.isPaused(), dataListeners: process.stdin.listenerCount('data') }) + '\\n');
+    `;
+    const child = childProcess.spawn(process.execPath, ['--input-type=module', '--eval', source], {
+      env: { ...process.env, HOME: home.root, USERPROFILE: home.root }, stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    const closed = once(child, 'close');
+    t.after(async () => {
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+      await closed;
+    });
+    let stdout = '', stderr = '', action: ReturnType<typeof setTimeout> | undefined;
+    child.stdout.on('data', chunk => { stdout += chunk.toString(); });
+    child.stderr.on('data', chunk => {
+      stderr += chunk.toString();
+      if (mode !== 'deadline' && !action && stderr.includes('then press Enter here:')) {
+        action = setTimeout(() => {
+          if (mode === 'signal') child.kill('SIGINT');
+          else child.stdin.write('\n');
+        }, 100);
+      }
+    });
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    t.after(() => { if (action) clearTimeout(action); if (timeout) clearTimeout(timeout); });
+    const exit = await Promise.race([
+      closed,
+      new Promise<null>(done => { timeout = setTimeout(() => done(null), 2500); }),
+    ]);
+    assert.ok(exit, `CLI did not exit naturally with stdin left open: ${stderr}`);
+    assert.equal(exit[0], mode === 'deadline' || mode === 'http-fault' ? 1 : 0, stderr);
+    assert.equal(exit[1], null, 'successful regression must not rely on a kill signal');
+    assert.equal(child.stdin.writableEnded, false, 'test must not send stdin EOF to make the CLI exit');
+    assert.equal(stdout, '');
+    const returned = /CLI_RETURNED (\{[^\n]+\})/.exec(stderr);
+    assert.ok(returned?.[1], stderr);
+    assert.deepEqual(JSON.parse(returned[1]), { code: exit[0], paused: true, dataListeners: 0 });
+    if (mode === 'deadline') {
+      assert.match(stderr, /Login deadline expired/);
+      assert.doesNotMatch(stderr, /HUMAN_CONFIRMED|profile saved/);
+    }
+    if (mode === 'human') assert.match(stderr, /HUMAN_CONFIRMED/);
+    if (mode === 'http-fault') { assert.match(stderr, /CANCEL_AWAITED/); assert.match(stderr, /login_timeout/); }
+    else assert.match(stderr, /BROWSER_STOPPED/);
+    const root = process.platform === 'win32' ? join(home.root, 'AppData', 'Local', 'figma-server')
+      : process.platform === 'darwin' ? join(home.root, 'Library', 'Application Support', 'figma-server') : join(home.root, '.figma-server');
+    await assert.rejects(lstat(join(root, 'daemon.lock')), { code: 'ENOENT' });
+    const unlock = await new State(root).lock();
+    await unlock();
+  });
+}
+
+for (const expiration of ['backend', 'server'] as const) {
+test(`daemon ${expiration} deadline exits without Enter or an RPC callback with stdin open`, async t => {
+  const home = await isolated(t);
+  const root = process.platform === 'win32' ? join(home.root, 'AppData', 'Local', 'figma-server')
+    : process.platform === 'darwin' ? join(home.root, 'Library', 'Application Support', 'figma-server') : join(home.root, '.figma-server');
+  const state = new State(root);
+  await state.init({ version: 1, accounts: [{ name: 'default', loginOrigins: [] }] });
+  const browser = new FakeBrowser(['default']);
+  let expired = false, drained = false;
+  if (expiration === 'server') {
+    const realTimeout = globalThis.setTimeout;
+    t.mock.method(globalThis, 'setTimeout', (callback: (...args: unknown[]) => void, delay?: number, ...args: unknown[]) => {
+      if (delay === LIMITS.loginMs) return realTimeout(() => { expired = true; callback(...args); }, 40);
+      return realTimeout(callback, delay, ...args);
+    });
+  }
+  browser.login = async (account, confirm) => {
+    browser.states.set(account, { account, state: 'authorizing' });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const confirmed = confirm().then(() => browser.status(account));
+      if (expiration === 'server') return await confirmed;
+      return await Promise.race([
+        confirmed,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => { expired = true; reject(new Fault('login_timeout', 'Backend login expired.', 409)); }, 40);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+      await new Promise(done => setTimeout(done, 200));
+      browser.states.set(account, { account, state: 'stopped' });
+      drained = true;
+    }
+  };
+  const core = new Core(browser, state, await Metadata.open(state));
+  const daemon = await serve(core, { token: await state.secret(), accounts: ['default'] });
+  t.after(async () => { await daemon.close(); await core.stop(); });
+  const source = `
+    import { runCli } from ${JSON.stringify(pathToFileURL(cliPath).href)};
+    const realFetch = globalThis.fetch;
+    let confirms = 0, cancels = 0;
+    globalThis.fetch = async (url, init) => {
+      if (String(url).endsWith('/api/login/confirm')) confirms++;
+      if (String(url).endsWith('/api/login/cancel')) {
+        if (init.signal.aborted) throw new Error('cleanup signal was aborted');
+        cancels++;
+      }
+      return realFetch(url, init);
+    };
+    process.stdin.isTTY = true;
+    process.exitCode = await runCli(['login'], { confirmationMs: ${expiration === 'server' ? 300 : 150} });
+    process.stderr.write('CLI_RETURNED ' + JSON.stringify({ code: process.exitCode, confirms, cancels,
+      paused: process.stdin.isPaused(), dataListeners: process.stdin.listenerCount('data') }) + '\\n');
+  `;
+  const child = childProcess.spawn(process.execPath, ['--input-type=module', '--eval', source], {
+    env: { ...process.env, HOME: home.root, USERPROFILE: home.root }, stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  const closed = once(child, 'close');
+  t.after(async () => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); await closed; });
+  let stdout = '', stderr = '';
+  child.stdout.on('data', chunk => { stdout += chunk.toString(); });
+  child.stderr.on('data', chunk => { stderr += chunk.toString(); });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const exit = await Promise.race([closed, new Promise<null>(done => { timer = setTimeout(() => done(null), 2500); })]);
+  clearTimeout(timer);
+  assert.ok(exit, `CLI waited for Enter after the server deadline: ${stderr}`);
+  assert.deepEqual(exit, [1, null], stderr);
+  assert.equal(child.stdin.writableEnded, false, 'stdin remains open and no Enter was sent');
+  assert.equal(stdout, '');
+  assert.ok(expired && drained, 'cancel must await the independently expired backend draining');
+  assert.equal(browser.status('default').state, 'stopped');
+  assert.match(stderr, /Login timed out.*figma-server login/);
+  assert.match(stderr, expiration === 'server' ? /cleanup could not be confirmed/ : /daemon login cleanup completed/);
+  assert.doesNotMatch(stderr, /profile saved/);
+  assert.ok(!stderr.includes(await state.secret()));
+  const returned = /CLI_RETURNED (\{[^\n]+\})/.exec(stderr);
+  assert.ok(returned?.[1], stderr);
+  assert.deepEqual(JSON.parse(returned[1]), { code: 1, confirms: 0, cancels: 1, paused: true, dataListeners: 0 });
+  await assert.rejects(lstat(state.path('daemon.lock')), { code: 'ENOENT' });
+});
+}
+
 test('interrupted daemon login uses an independent authenticated cancel request and awaits browser cleanup', async t => {
   const state = await initialized(t);
   const browser = new FakeBrowser(['default']);
@@ -325,7 +518,8 @@ test('SDK stdio client negotiates HTTP, calls tools/images, and releases session
   const core = new Core(browser, state, await Metadata.open(state));
   const daemon = await serve(core, { token: await state.secret(), accounts: ['default'] });
   t.after(async () => { await daemon.close(); await core.stop(); });
-  const transport = new StdioClientTransport({ command: process.execPath, args: [entry, 'mcp'], env: childEnv, stderr: 'pipe' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [entry, 'mcp'], env: childEnv, stderr: 'pipe',
+    maxBufferSize: LIMITS.uploadBodyBytes + 64 * 1024 });
   let diagnostics = '';
   transport.stderr?.on('data', chunk => { diagnostics += chunk.toString(); });
   const client = new Client({ name: 'cli-test', version: '1' });
@@ -334,11 +528,35 @@ test('SDK stdio client negotiates HTTP, calls tools/images, and releases session
   assert.ok((await client.listTools()).tools.some(tool => tool.name === 'figma.open'));
   const status = await client.callTool({ name: 'figma.account_status', arguments: { account: 'default' } });
   assert.ok(JSON.stringify(status).includes('ready'));
-  const opened = await client.callTool({ name: 'figma.open', arguments: { account: 'default', file_url: 'https://www.figma.com/design/abcdef123', mode: 'read' } });
+  const opened = await client.callTool({ name: 'figma.open', arguments: { account: 'default', file_url: 'https://www.figma.com/design/abcdef123', mode: 'write' } });
   const content = opened.content as { type: string; text: string }[];
   const lease = (JSON.parse(content[0]!.text) as { lease: string }).lease;
   const image = await client.callTool({ name: 'figma.screenshot', arguments: { lease } });
   assert.ok((image.content as { type: string }[]).some(item => item.type === 'image'));
+  const supplied = paddedPng(LIMITS.imageBytes);
+  const encoded = supplied.toString('base64');
+  const trigger = { by: 'role', role: 'button', name: 'Upload image' } as const;
+  let uploads = 0;
+  browser.tabs[0]!.uploadImage = async (payload, locator) => {
+    uploads++;
+    assert.equal(payload.name, 'supplied.png');
+    assert.equal(payload.mimeType, 'image/png');
+    assert.ok(payload.buffer.equals(supplied), 'SDK stdio must forward the exact supplied 8 MiB image bytes');
+    assert.deepEqual(locator, trigger);
+  };
+  const uploaded = await client.callTool({ name: 'figma.upload_image', arguments: {
+    lease, filename: 'supplied.png', data_base64: encoded, trigger,
+  } });
+  assert.equal(uploaded.isError, false);
+  assert.equal(uploads, 1);
+  const screenshot = browser.tabs[0]!.screenshot;
+  browser.tabs[0]!.screenshot = async () => supplied;
+  try {
+    const result = await client.callTool({ name: 'figma.screenshot', arguments: { lease } });
+    const returned = (result.content as { type: string; data?: string }[]).find(item => item.type === 'image');
+    assert.ok(returned?.data === encoded, 'stdout must preserve a valid 8 MiB image response');
+  } finally { browser.tabs[0]!.screenshot = screenshot; }
+  await client.callTool({ name: 'figma.click', arguments: { lease, locator: trigger, modifiers: ['Shift', 'ControlOrMeta'] } });
   assert.equal(core.sessions.sessions.size, 1);
   assert.equal(core.sessions.leases.size, 1);
   await client.close();
@@ -375,7 +593,138 @@ test('proxy exits on EOF/signal and rejects oversized input without leaking cred
   await signalled;
   const oversized = new PassThrough();
   const rejected = stdioProxy(state, { stdin: oversized, stdout: output.stream, stderr: errors.stream });
-  oversized.write('a'.repeat(128 * 1024 + 1));
+  oversized.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call',
+    params: { name: 'unknown', arguments: { text: 'a'.repeat(LIMITS.bodyBytes) } } }) + '\n');
   await assert.rejects(rejected, { code: 'mcp_connection_failed' });
   assert.ok(!errors.text().includes(await state.secret()));
+});
+
+test('proxy large-frame exemption rejects ordinary calls, fake uploads and invalid images before HTTP forwarding', async t => {
+  const state = await initialized(t);
+  let forwarded = 0;
+  t.mock.method(globalThis, 'fetch', async () => { forwarded++; throw new Error('must not forward'); });
+  const data = paddedPng(160 * 1024).toString('base64');
+  const arguments_ = { lease: '00000000-0000-4000-8000-000000000001', filename: 'image.png',
+    data_base64: data, trigger: { by: 'role', role: 'button', name: 'Upload image' } };
+  const upload = { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'figma.upload_image', arguments: arguments_ } };
+  const invalid = [
+    { ...upload, method: 'unknown' },
+    { ...upload, params: { ...upload.params, name: 'unknown' } },
+    { ...upload, params: { ...upload.params, arguments: { ...arguments_, host_path: '/private/image.png' } } },
+    { ...upload, params: { ...upload.params, arguments: { ...arguments_, lease: 'invalid' } } },
+    { ...upload, params: { ...upload.params, arguments: { ...arguments_, filename: '../image.png' } } },
+    { ...upload, params: { ...upload.params, arguments: { ...arguments_, data_base64: 'a'.repeat(data.length) } } },
+    { ...upload, params: { ...upload.params, arguments: { ...arguments_, data_base64: paddedPng(LIMITS.imageBytes + 1).toString('base64') } } },
+    { ...upload, id: 'a'.repeat(LIMITS.bodyBytes) },
+    { ...upload, params: { ...upload.params, _meta: { padding: 'a'.repeat(LIMITS.bodyBytes) } } },
+    { jsonrpc: '2.0', method: upload.method, params: upload.params },
+  ];
+  const hugeDimension = paddedPng(160 * 1024);
+  hugeDimension.writeUInt32BE(8193, 16);
+  invalid.push({ ...upload, params: { ...upload.params, arguments: { ...arguments_, data_base64: hugeDimension.toString('base64') } } });
+  const frames = invalid.map(value => JSON.stringify(value) + '\n');
+  // A tiny real image plus whitespace must not buy an oversized ordinary frame.
+  frames.push(' '.repeat(LIMITS.bodyBytes) + JSON.stringify({ ...upload,
+    params: { ...upload.params, arguments: { ...arguments_, data_base64: PNG.toString('base64') } } }) + '\n');
+  for (const frame of frames) {
+    const input = new PassThrough(), out = capture(), err = capture();
+    const ready = once(input, 'resume');
+    const pending = stdioProxy(state, { stdin: input, stdout: out.stream, stderr: err.stream });
+    const rejected = assert.rejects(pending, { code: 'mcp_connection_failed' });
+    await ready;
+    input.write(frame);
+    await rejected;
+    input.destroy();
+    assert.equal(out.text(), '');
+    assert.ok(!err.text().includes(await state.secret()));
+  }
+  assert.equal(forwarded, 0);
+});
+
+test('proxy bounds partial frames before SDK buffering and releases the shared upload budget on close', { timeout: 5000 }, async t => {
+  const state = await initialized(t);
+  const inputs: PassThrough[] = [];
+  const pending: Promise<unknown>[] = [];
+  t.after(async () => { for (const input of inputs) input.end(); await Promise.allSettled(pending); });
+  const start = async () => {
+    const input = new PassThrough(); inputs.push(input);
+    const ready = once(input, 'resume');
+    const result = stdioProxy(state, { stdin: input, stdout: capture().stream, stderr: capture().stream });
+    void result.catch(() => undefined); pending.push(result);
+    await ready;
+    return { input, result };
+  };
+  const first = await start(), second = await start(), third = await start();
+  first.input.write('a'.repeat(LIMITS.bodyBytes + 1));
+  second.input.write('a'.repeat(LIMITS.bodyBytes + 1));
+  third.input.write('a'.repeat(LIMITS.bodyBytes + 1));
+  await assert.rejects(third.result, { code: 'mcp_connection_failed' });
+  first.input.end(); second.input.end();
+  await Promise.all([first.result, second.result]);
+  const bounded = await start();
+  const chunk = Buffer.alloc(64 * 1024, 97);
+  let bytes = 0, failed = false;
+  void bounded.result.catch(() => { failed = true; });
+  // Model a 4 GiB unterminated sender without allocating its declared payload.
+  while (bytes <= LIMITS.uploadBodyBytes + chunk.length && !failed) {
+    bounded.input.write(chunk); bytes += chunk.length;
+    await new Promise<void>(done => setImmediate(done));
+  }
+  assert.ok(failed, 'a 4 GiB sender must already be rejected after the bounded prefix');
+  await assert.rejects(bounded.result, { code: 'mcp_connection_failed' });
+  assert.ok(bytes > LIMITS.uploadBodyBytes, 'a large partial upload gets the bounded allowance');
+  assert.ok(bytes <= LIMITS.uploadBodyBytes + chunk.length, 'reject before buffering a 4 GiB partial frame');
+  const recovered = await start();
+  recovered.input.write('a'.repeat(LIMITS.bodyBytes + 1));
+  recovered.input.end();
+  await recovered.result;
+});
+
+test('proxy keeps large requests within the shared budget until authenticated HTTP sends settle', { timeout: 5000 }, async t => {
+  const state = await initialized(t), token = await state.secret();
+  const frame = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: {
+    name: 'figma.upload_image', arguments: { lease: '00000000-0000-4000-8000-000000000001', filename: 'image.png',
+      data_base64: paddedPng(160 * 1024).toString('base64'), trigger: { by: 'text', name: 'Upload' } },
+  } }) + '\n';
+  let forwarded = 0, resolvePosted!: () => void;
+  const posted = new Promise<void>(done => { resolvePosted = done; });
+  let resolveRecovered!: () => void;
+  const recoveredPosted = new Promise<void>(done => { resolveRecovered = done; });
+  t.mock.method(globalThis, 'fetch', async (url: string | URL | Request, init?: RequestInit) => {
+    assert.equal(String(url), `${DAEMON_URL}/mcp`);
+    assert.equal(new Headers(init?.headers).get('Authorization'), `Bearer ${token}`);
+    assert.equal(init?.method, 'POST');
+    assert.equal(init?.body, frame.trimEnd());
+    if (++forwarded === 2) resolvePosted();
+    if (forwarded === 3) resolveRecovered();
+    return new Promise<Response>((_done, reject) => {
+      const abort = () => reject(init!.signal!.reason);
+      init!.signal!.addEventListener('abort', abort, { once: true });
+      if (init!.signal!.aborted) abort();
+    });
+  });
+  const running: { input: PassThrough; result: Promise<void> }[] = [];
+  t.after(async () => { for (const entry of running) entry.input.end(); await Promise.allSettled(running.map(entry => entry.result)); });
+  const start = async () => {
+    const input = new PassThrough(), ready = once(input, 'resume');
+    const result = stdioProxy(state, { stdin: input, stdout: capture().stream, stderr: capture().stream });
+    void result.catch(() => undefined);
+    const entry = { input, result }; running.push(entry);
+    await ready;
+    return entry;
+  };
+  const first = await start(), second = await start(), third = await start();
+  first.input.write(frame); second.input.write(frame);
+  await posted;
+  third.input.write(frame);
+  await assert.rejects(third.result, { code: 'mcp_connection_failed' });
+  assert.equal(forwarded, 2, 'a third large call must not reach HTTP while two sends are pending');
+  first.input.end(); second.input.end();
+  await Promise.all([first.result, second.result]);
+  const recovered = await start();
+  recovered.input.write(frame);
+  await recoveredPosted;
+  recovered.input.end();
+  await recovered.result;
+  assert.equal(forwarded, 3, 'closed requests must release the shared budget');
 });

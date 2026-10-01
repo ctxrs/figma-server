@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { accountName, expectationSchema, locatorSchema, pointSchema, LIMITS } from './security.js';
+import { accountName, expectationSchema, locatorSchema, pointSchema, modifiersSchema, LIMITS } from './security.js';
 import { fault } from './errors.js';
 
 const lease = z.string().uuid();
@@ -25,13 +25,14 @@ export const toolSchemas = {
   'figma.reload': z.object({ lease }).strict(),
   'figma.screenshot': z.object({ lease, scope: locatorSchema.optional() }).strict(),
   'figma.artifact_read': z.object({ job_id: z.string().regex(/^job_[a-f0-9-]{36}$/), file: z.enum(['before.png', 'after.png', 'screenshot.png', 'export.png']) }).strict(),
-  'figma.click': z.object({ lease, locator: locatorSchema, expectation }).strict(),
-  'figma.pointer_click': z.object({ lease, point: pointSchema, clicks: z.union([z.literal(1), z.literal(2)]).default(1), button: z.enum(['left', 'right']).default('left'), expectation }).strict(),
+  'figma.click': z.object({ lease, locator: locatorSchema, modifiers: modifiersSchema, expectation }).strict(),
+  'figma.pointer_click': z.object({ lease, point: pointSchema, clicks: z.union([z.literal(1), z.literal(2)]).default(1), button: z.enum(['left', 'right']).default('left'), modifiers: modifiersSchema, expectation }).strict(),
   'figma.type_text': z.object({ lease, text: z.string().min(1).max(LIMITS.text), expectation }).strict(),
   'figma.wheel': z.object({ lease, point: pointSchema, delta_x: z.number().min(-1200).max(1200).default(0), delta_y: z.number().min(-1200).max(1200), expectation }).strict(),
   'figma.fill': z.object({ lease, locator: locatorSchema, text: z.string().max(LIMITS.text), expectation }).strict(),
   'figma.keypress': z.object({ lease, keys: z.string().min(1).max(80).regex(/^[A-Za-z0-9+_-]+$/), expectation }).strict(),
-  'figma.drag': z.object({ lease, from: pointSchema, to: pointSchema, expectation }).strict(),
+  'figma.drag': z.object({ lease, from: pointSchema, to: pointSchema, modifiers: modifiersSchema, expectation }).strict(),
+  'figma.upload_image': z.object({ lease, filename: z.string().min(1).max(105), data_base64: z.string().min(1).max(LIMITS.imageBase64Chars), trigger: locatorSchema, expectation }).strict(),
   'figma.paste_html': z.object({ lease, html: z.string().max(64 * 1024), target: locatorSchema.optional(), expectation }).strict(),
   // V1 export is an explicit rendered PNG, not a native Figma node export.
   'figma.export': z.object({ lease, format: z.literal('png'), node: locatorSchema.optional() }).strict(),
@@ -59,6 +60,7 @@ export const toolDescriptions: Record<ToolName, string> = {
   'figma.fill': 'Fill an exact editor locator; no login forms.',
   'figma.keypress': 'Send one key with optional Control/Meta/Alt/Shift/ControlOrMeta modifiers. Use separate calls for multiple keys. Native clipboard shortcuts are disabled; use type_text/fill or Control/Meta+D for Duplicate. UI clipboard menus are unsupported across concurrent jobs.',
   'figma.drag': 'Drag between coordinates within the fixed viewport.',
+  'figma.upload_image': 'Upload supplied bounded PNG/JPEG bytes through one exact file-chooser trigger in the owned editor. No local file paths or URL fetching. Input dispatch alone does not prove a saved native image edit.',
   'figma.paste_html': 'Dispatch offline HTML clipboard data. Native Figma insertion is not guaranteed.',
   'figma.export': 'Capture a rendered PNG viewport or accessible element. This is not a native node export.',
   'figma.wait_for': 'Wait for a bounded typed visible or saved-state predicate.',

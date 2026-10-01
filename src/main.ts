@@ -6,30 +6,41 @@ import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { Core } from './core.js';
 import { Fault, fault, publicError } from './errors.js';
-import { LIMITS, accountName, checkHttpBoundary } from './security.js';
+import { LIMITS, accountName, checkHttpBoundary, isUploadRequest, isUploadInput } from './security.js';
 import { toolSchemas, toolDescriptions } from './tools.js';
 
 type McpSession = { transport: StreamableHTTPServerTransport; server: McpServer; touched: number; signals: Map<string | number, AbortSignal> };
 type Login = { id: string; account: string; confirm: () => void; cancel: () => void; result: Promise<unknown>; timer: ReturnType<typeof setTimeout> };
 export type HttpOptions = { port?: number; host?: '127.0.0.1' | '::1'; token: string; accounts: string[] };
 
-async function body(req: IncomingMessage): Promise<unknown> {
+async function body(req: IncomingMessage, maximum: number = LIMITS.bodyBytes, reserveLarge?: () => () => void, uploadOnly = false): Promise<unknown> {
   if (req.headers['content-type']?.split(';')[0] !== 'application/json') fault('content_type', 'Content-Type must be application/json.', 415);
   const length = Number(req.headers['content-length'] ?? 0);
-  if (length > LIMITS.bodyBytes || !Number.isFinite(length)) fault('body_too_large', 'Request body is too large.', 413);
+  if (length > maximum || !Number.isFinite(length)) fault('body_too_large', 'Request body is too large.', 413);
   const chunks: Buffer[] = [];
   let size = 0;
-  for await (const chunk of req) {
-    const buffer: Buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string);
-    size += buffer.length;
-    if (size > LIMITS.bodyBytes) fault('body_too_large', 'Request body is too large.', 413);
-    chunks.push(buffer);
-  }
-  try { return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown; }
-  catch { return fault('invalid_json', 'Request body must be valid JSON.'); }
+  let release: (() => void) | undefined;
+  try {
+    if (length > LIMITS.bodyBytes) release = reserveLarge?.();
+    for await (const chunk of req) {
+      const buffer: Buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string);
+      size += buffer.length;
+      if (size > maximum) fault('body_too_large', 'Request body is too large.', 413);
+      if (size > LIMITS.bodyBytes && !release) release = reserveLarge?.();
+      chunks.push(buffer);
+    }
+    let value: unknown;
+    try { value = JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown; }
+    catch { return fault('invalid_json', 'Request body must be valid JSON.'); }
+    if (size > LIMITS.bodyBytes && !(uploadOnly ? isUploadInput(value, size) : isUploadRequest(value, size))) fault('body_too_large', 'Only image bytes with bounded metadata permit larger bodies.', 413);
+    return value;
+  } finally { release?.(); }
 }
 function send(res: ServerResponse, status: number, value: unknown): void {
   if (res.headersSent) return;
+  // Early auth/size rejection must not leave an unread body framing another
+  // request on this connection. Clients can reconnect with the same MCP session.
+  if (status >= 400 && !res.req.complete) res.setHeader('Connection', 'close');
   res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
   res.end(JSON.stringify(value));
 }
@@ -44,6 +55,12 @@ export async function serve(core: Core, options: HttpOptions): Promise<{ url: st
   if (host !== '127.0.0.1' && host !== '::1') fault('unsafe_listen', 'V1 supports loopback only. Use a tunnel for remote access.');
   let expectedHost = '';
   let inFlight = 0;
+  let largeBodies = 0;
+  const reserveLarge = () => {
+    if (largeBodies >= LIMITS.uploads) fault('upload_limit', 'Large upload body capacity is unavailable.', 429);
+    largeBodies++;
+    return () => { largeBodies--; };
+  };
   let closing = false;
   const mcp = new Map<string, McpSession>();
   const logins = new Map<string, Login>();
@@ -77,7 +94,9 @@ export async function serve(core: Core, options: HttpOptions): Promise<{ url: st
         if (path.startsWith('/api/tools/') && req.method === 'POST') {
           const session = header(req, 'x-figma-session');
           if (!session) fault('invalid_session', 'X-Figma-Session is required.', 400);
-          const result = await core.call(session, path.slice('/api/tools/'.length), await body(req), controller.signal);
+          core.sessions.session(session);
+          const upload = path === '/api/tools/figma.upload_image';
+          const result = await core.call(session, path.slice('/api/tools/'.length), await body(req, upload ? LIMITS.uploadBodyBytes : LIMITS.bodyBytes, reserveLarge, upload), controller.signal);
           send(res, 200, result); return;
         }
         if (path.startsWith('/api/artifacts/') && req.method === 'GET') {
@@ -159,7 +178,8 @@ export async function serve(core: Core, options: HttpOptions): Promise<{ url: st
         if (!['POST', 'GET', 'DELETE'].includes(req.method ?? '')) fault('method', 'Method not allowed.', 405);
         const id = header(req, 'mcp-session-id');
         let session = id ? mcp.get(id) : undefined;
-        const payload = req.method === 'POST' ? await body(req) : undefined;
+        if (id) core.sessions.session(id);
+        const payload = req.method === 'POST' ? await body(req, LIMITS.uploadBodyBytes, reserveLarge) : undefined;
         if (!session) {
           if (id) fault('invalid_session', 'MCP session is invalid or expired.', 404);
           if (req.method !== 'POST' || !isInitializeRequest(payload)) fault('initialize_required', 'Initialize an MCP session first.', 400);

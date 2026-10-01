@@ -5,9 +5,11 @@ import type { Readable, Writable } from 'node:stream';
 import { Transform } from 'node:stream';
 import { State } from './state.js';
 import { fault } from './errors.js';
-import { LIMITS } from './security.js';
+import { isUploadRequest, LIMITS, suppliedImage } from './security.js';
+import { toolSchemas } from './tools.js';
 
 export const DAEMON_URL = 'http://127.0.0.1:4317';
+let largeFrames = 0;
 
 // Forward the protocol unchanged, including IDs, notifications and cancellation.
 // The SDK owns framing, HTTP sessions and SSE; there is no second MCP server.
@@ -19,12 +21,34 @@ export async function stdioProxy(state: State, options: {
   const diagnostics = options.stderr ?? process.stderr;
   const token = await state.secret();
   let lineBytes = 0;
+  let lineRelease: (() => void) | undefined;
+  const reservations = new Set<() => void>();
+  const frames: { bytes: number; release?: () => void }[] = [];
   const guard = new Transform({ transform(chunk: Buffer, _encoding, callback) {
-    for (const byte of chunk) {
-      if (byte === 10) lineBytes = 0;
-      else if (++lineBytes > LIMITS.bodyBytes) { callback(new Error('MCP input line exceeds its limit.')); return; }
+    // Bound each segment before it reaches the SDK's ReadBuffer. Splitting at
+    // LF also prevents a single chunk from buffering many messages at once.
+    let offset = 0;
+    while (offset < chunk.length && !closing) {
+      const newline = chunk.indexOf(10, offset);
+      const end = newline < 0 ? chunk.length : newline;
+      lineBytes += end - offset;
+      if (lineBytes > LIMITS.uploadBodyBytes) { callback(new Error('MCP input line exceeds its limit.')); return; }
+      if (lineBytes > LIMITS.bodyBytes && !lineRelease) {
+        if (largeFrames >= LIMITS.uploads) { callback(new Error('MCP upload capacity is unavailable.')); return; }
+        largeFrames++;
+        const release = () => { if (reservations.delete(release)) largeFrames--; };
+        reservations.add(release);
+        lineRelease = release;
+      }
+      if (newline >= 0) {
+        frames.push({ bytes: lineBytes, release: lineRelease });
+        lineBytes = 0;
+        lineRelease = undefined;
+      }
+      this.push(chunk.subarray(offset, newline < 0 ? end : end + 1));
+      offset = newline < 0 ? end : end + 1;
     }
-    callback(null, chunk);
+    callback();
   } });
   const upstream = new StreamableHTTPClientTransport(new URL(`${DAEMON_URL}/mcp`), {
     requestInit: { headers: { Authorization: `Bearer ${token}` } },
@@ -35,12 +59,13 @@ export async function stdioProxy(state: State, options: {
     }),
     reconnectionOptions: { maxRetries: 0, initialReconnectionDelay: 1000, maxReconnectionDelay: 1000, reconnectionDelayGrowFactor: 1 },
   });
-  const downstream = new StdioServerTransport(guard, output);
+  const downstream = new StdioServerTransport(guard, output, { maxBufferSize: LIMITS.uploadBodyBytes + 1 });
   let closing: Promise<void> | undefined;
   let failure: Error | undefined;
   let handshake = Promise.resolve();
   let initializeId: string | number | undefined;
   let active = 0;
+  const pending = new Set<Promise<void>>();
   let finish!: () => void;
   const done = new Promise<void>(resolve => { finish = resolve; });
 
@@ -58,7 +83,13 @@ export async function stdioProxy(state: State, options: {
       await handshake.catch(() => undefined);
       try { await upstream.terminateSession(); }
       catch { diagnostics.write('MCP session cleanup could not be confirmed. Run figma-server status; restart the daemon if a file remains busy.\n'); }
-      finally { await upstream.close(); finish(); }
+      finally {
+        await upstream.close();
+        await Promise.allSettled(pending);
+        for (const release of reservations) release();
+        frames.length = 0;
+        finish();
+      }
     })();
     return closing;
   };
@@ -83,6 +114,19 @@ export async function stdioProxy(state: State, options: {
   };
   downstream.onmessage = message => {
     if (closing) return;
+    const frame = frames.shift();
+    if (!frame) { fail(undefined); return; }
+    if (frame.bytes > LIMITS.bodyBytes) {
+      try {
+        if (!isUploadRequest(message)) throw new Error('Only uploads permit large frames.');
+        const image = toolSchemas['figma.upload_image'].parse('params' in message ? message.params?.arguments : undefined);
+        const encoded = image.data_base64;
+        const bytes = encoded.length / 4 * 3 - (encoded.endsWith('==') ? 2 : encoded.endsWith('=') ? 1 : 0);
+        // Check decoded size and raw overhead before allocating an image Buffer.
+        if (bytes > LIMITS.imageBytes || frame.bytes - encoded.length > LIMITS.uploadMetadataBytes) throw new Error('Upload exceeds its limits.');
+        suppliedImage(image.filename, encoded);
+      } catch { frame.release?.(); fail(undefined); return; }
+    }
     if (active >= LIMITS.queue) { fail(undefined); return; }
     active++;
     let sent: Promise<void>;
@@ -98,7 +142,8 @@ export async function stdioProxy(state: State, options: {
       // cancellation notification or other independent requests reaching HTTP.
       sent = handshake.then(() => upstream.send(message));
     }
-    void sent.catch(fail).finally(() => { active--; });
+    const settled = sent.catch(fail).finally(() => { active--; frame.release?.(); pending.delete(settled); });
+    pending.add(settled);
   };
   input.once('end', onEnd);
   output.once('error', onOutputError);

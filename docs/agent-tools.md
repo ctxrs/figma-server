@@ -53,6 +53,48 @@ as unverified. Do not repeat an uncertain write automatically. A reload checks
 the current browser's view of the file; it does not establish native node
 structure or a transactional save guarantee.
 
+## Supplying an image
+
+Open a writer lease and inspect the current editor to find an exact control
+that opens its image file chooser. Base64-encode the PNG or JPEG in the caller
+and send the bytes with that trigger. For example:
+
+```json
+{
+  "lease": "<returned UUID>",
+  "filename": "reference.png",
+  "data_base64": "<base64-encoded PNG bytes>",
+  "trigger": {"by": "role", "role": "button", "name": "<observed image chooser control>"}
+}
+```
+
+Pass this argument object to `figma.upload_image`, replacing the placeholders
+with the owned lease, encoded image, and an observed locator. `data_base64`
+must be canonical base64 without line breaks or a `data:` prefix. `filename`
+is a simple basename with a matching `.png`, `.jpg`, or `.jpeg` extension, not
+a path. The server does not read host files or fetch URLs for this tool.
+
+One call supplies one image: at most 8 MiB of decoded bytes, 8,192 pixels per
+side, and 16,777,216 pixels total. Animated PNG, SVG, and other formats are
+unsupported. The server registers the chooser listener before clicking the
+trigger and supplies a byte payload inside the owned writer's command queue.
+Do not click the trigger separately or open a chooser in another tab first.
+
+Both the MCP stdio proxy and HTTP API accept validated image uploads up to
+the 8 MiB decoded limit. Ordinary messages remain limited to 128 KiB; uploads
+allow the encoded image plus up to 16 KiB of JSON metadata. The proxy bounds
+pending large messages to two, separately from the core's limit of two admitted
+upload operations. Ordinary calls and cancellation can continue while uploads
+are pending. Wait for earlier calls to settle before submitting more images.
+
+Delivery to the chooser does not prove native Figma insertion or saving.
+Inspect the result, take a screenshot, check the save indicator, and reopen or
+reload before claiming persistence. An optional `expectation` checks only its
+specified observable condition; without one the receipt remains `unverified`.
+Source and MCP transport checks have passed for the new contracts. Their native
+fixture qualification is in progress; earlier browser fixture passes do not
+establish these primitives or live Figma behavior.
+
 ## Tool reference
 
 Tool names use the `figma.` prefix. Inputs are strict: use the field names below
@@ -70,13 +112,14 @@ and omit fields that are not supported. `lease` is the UUID returned by
 | `figma.reload` | `lease` | Reload the leased file and recheck editor readiness, retaining the lease on success. |
 | `figma.screenshot` | `lease`, optional locator `scope` | PNG of the viewport or accessible element. |
 | `figma.artifact_read` | `job_id`, `file` | Read a PNG owned by the current session; `file` is `before.png`, `after.png`, `screenshot.png`, or `export.png`. |
-| `figma.click` | `lease`, `locator`, optional `expectation` | Click an exact accessible locator. |
-| `figma.pointer_click` | `lease`, `point`, optional `clicks`, `button`, and `expectation` | Click screenshot coordinates; `clicks` is 1 or 2, default 1; `button` is `left` or `right`, default `left`. |
+| `figma.click` | `lease`, `locator`, optional `modifiers` and `expectation` | Click an exact accessible locator with modifiers held for that gesture. |
+| `figma.pointer_click` | `lease`, `point`, optional `clicks`, `button`, `modifiers`, and `expectation` | Click screenshot coordinates; `clicks` is 1 or 2, default 1; `button` is `left` or `right`, default `left`. |
 | `figma.type_text` | `lease`, `text`, optional `expectation` | Insert 1–4,096 characters into the currently focused editor control or canvas text editor. |
 | `figma.wheel` | `lease`, `point`, `delta_y`, optional `delta_x` and `expectation` | Position the pointer and scroll; deltas range from −1,200 to 1,200, `delta_x` defaults to 0. Requires a writer lease. |
 | `figma.fill` | `lease`, `locator`, `text`, optional `expectation` | Fill an editor control; text is limited to 4,096 characters. |
-| `figma.keypress` | `lease`, `keys`, optional `expectation` | A Playwright keyboard chord of at most 80 characters; clipboard shortcuts are rejected before dispatch. |
-| `figma.drag` | `lease`, `from`, `to`, optional `expectation` | Viewport-coordinate drag. |
+| `figma.keypress` | `lease`, `keys`, optional `expectation` | One final key with optional keyboard modifiers, at most 80 characters; use separate calls for multiple keys. Clipboard shortcuts are rejected before dispatch. |
+| `figma.drag` | `lease`, `from`, `to`, optional `modifiers` and `expectation` | Viewport-coordinate drag with modifiers held for that gesture. |
+| `figma.upload_image` | `lease`, `filename`, `data_base64`, `trigger`, optional `expectation` | Supply one PNG/JPEG byte payload to the leased editor's file chooser; requires a writer lease. Delivery is distinct from native insertion/save. |
 | `figma.paste_html` | `lease`, `html`, optional locator `target` and `expectation` | Synthetic paste of offline markup; native layer insertion is not established. |
 | `figma.export` | `lease`, `format: "png"`, optional locator `node` | A rendered screenshot, not a native Figma node export. |
 | `figma.wait_for` | `lease`, `predicate`, optional `timeout` | Typed expectation; timeout defaults to 10,000 ms, maximum 20,000 ms. |
@@ -177,6 +220,43 @@ filled field. A save indicator is an observation of the web editor, not a
 transactional durability guarantee. Screenshots let the agent review visible
 output but do not prove native node structure.
 
+## Modifier gestures
+
+`figma.click`, `figma.pointer_click`, and `figma.drag` accept an optional unique
+`modifiers` array containing `Shift`, `Alt`, `Control`, `Meta`, or
+`ControlOrMeta`. `ControlOrMeta` resolves to Meta on macOS and Control elsewhere
+on the browser server. Modifiers are held for one gesture and released in its
+cleanup; they do not remain held for the next tool call.
+
+For example, after inspecting the current selection, Shift-click an observed
+layer or screenshot point to try extending it:
+
+```json
+{
+  "lease": "<returned UUID>",
+  "locator": {"by": "role", "role": "treeitem", "name": "<observed layer name>"},
+  "modifiers": ["Shift"]
+}
+```
+
+Send that object to `figma.click`. For a modifier drag, send this to
+`figma.drag`, replacing the sample coordinates with points from the current
+screenshot:
+
+```json
+{
+  "lease": "<returned UUID>",
+  "from": {"x": 400, "y": 300},
+  "to": {"x": 520, "y": 360},
+  "modifiers": ["Meta"]
+}
+```
+
+The modifier's meaning depends on the current Figma tool, selection, and host
+OS; this example does not promise a specific layout or duplication effect.
+Inspect the result after each gesture. Use `modifiers` for a held-key click or
+drag rather than trying to hold a key across separate `figma.keypress` calls.
+
 ## Receipts
 
 Receipts identify the action with `jobId`, `fileKey`, `target`, `action`, and
@@ -254,6 +334,11 @@ write automatically. Screenshot/export references are local paths; to download
 one, use the corresponding authenticated artifact route rather than treating
 the path as a public URL.
 
+Ordinary request bodies are limited to 128 KiB. Image-upload bodies have a
+larger allowance for the base64 representation of an image up to 8 MiB plus
+up to 16 KiB of JSON metadata; this exception applies to `/api/tools/figma.upload_image` and
+an MCP `tools/call` for that tool. It does not increase other tools' limits.
+
 ## URL and paste limits
 
 File URLs must use `https://www.figma.com` and one of the `file`, `design`,
@@ -279,6 +364,11 @@ generic `operation_failed` message instead of forwarding raw browser details.
 | --- | --- |
 | `invalid_file` | Use an allowed Figma file URL, not a share redirect or arbitrary site. |
 | `invalid_selection` | Use a single numeric `node-id` or `page-id`, such as `1-2`; remove malformed or repeated selection parameters. |
+| `invalid_image` | Supply a canonical base64 PNG/JPEG with a simple matching filename, within the byte and dimension limits. |
+| `upload_timeout` | Inspect the current chooser trigger and editor state. Reopen an invalidated lease before trying again. |
+| `upload_limit` | Upload capacity is busy; wait for existing work and cleanup to finish. |
+| `modifier_cleanup_failed` | Modifier release could not be confirmed. Reopen and inspect after target cleanup; do not continue gestures on an uncertain target. |
+| `invalid_keypress` / `shared_clipboard` | Use one key per chord with supported modifiers. For explicit text use `type_text`/`fill`; native clipboard shortcuts are unsupported. |
 | `unsafe_html` | Use simple offline markup; remove active content and URLs. |
 | `unauthorized` | Check the local credential and use the configured proxy. A Figma API token is not the daemon's credential. |
 | `host_denied` / `origin_denied` | Use the configured loopback endpoint; do not work around the boundary with arbitrary forwarding headers. |

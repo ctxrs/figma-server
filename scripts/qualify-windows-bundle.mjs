@@ -6,9 +6,11 @@ import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { repositoryRoot } from '../tests/platform/runtime.mjs';
 
-const [candidateArgument, outputArgument] = process.argv.slice(2);
-if (!candidateArgument || !outputArgument || process.argv.length !== 4) {
-  throw new Error('Usage: node scripts/qualify-windows-bundle.mjs candidate.tgz OUTPUT_DIRECTORY');
+const [candidateArgument, outputArgument, suiteFlag, suiteArgument] = process.argv.slice(2);
+const suite = suiteArgument ?? 'full';
+if (!candidateArgument || !outputArgument || ![4, 6].includes(process.argv.length)
+  || (suiteFlag && suiteFlag !== '--suite') || !['full', 'primitives'].includes(suite)) {
+  throw new Error('Usage: node scripts/qualify-windows-bundle.mjs candidate.tgz OUTPUT_DIRECTORY [--suite full|primitives]');
 }
 const candidate = resolve(candidateArgument);
 const output = resolve(outputArgument);
@@ -46,7 +48,7 @@ try {
   }
   const filename = basename(candidate);
   await copyFile(candidate, join(stage, filename));
-  const candidateInfo = { filename, sha256: hash(await readFile(candidate)) };
+  const candidateInfo = { filename, sha256: hash(await readFile(candidate)), suite };
   await writeFile(join(stage, 'candidate.json'), JSON.stringify(candidateInfo, null, 2) + '\n');
   await writeFile(join(stage, 'windows-runtimes.json'), JSON.stringify(runtimes, null, 2) + '\n');
   await mkdir(join(stage, 'scripts'));
