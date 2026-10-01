@@ -78,8 +78,8 @@ test('installed production supervisor: real sandboxed Chromium, isolated tabs, r
   const profile = state.path('accounts', 'default', 'profile');
   const windowsProfileAcl = await auditWindowsAcl([
     { path: profile, directory: true, protected: true },
-    { path: join(profile, 'Default'), directory: true },
-    { path: join(profile, 'Local State') }, { path: join(profile, 'Default/Preferences') },
+    { path: join(profile, 'Default'), directory: true, inherited: true },
+    { path: join(profile, 'Local State'), inherited: true }, { path: join(profile, 'Default/Preferences'), inherited: true },
   ]);
   await supervisor.start();
   const restarted = await attachFixture(supervisor);
