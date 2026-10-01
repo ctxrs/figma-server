@@ -1,0 +1,48 @@
+name: Cross-platform qualification
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qualification-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  platform:
+    name: ${{ matrix.os }} / Node ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14, windows-2022]
+        node: ['22', '24']
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - name: Install full Chromium and Linux dependencies
+        if: runner.os == 'Linux'
+        run: npm exec -- playwright install --with-deps --no-shell chromium
+      - name: Install full Chromium
+        if: runner.os != 'Linux'
+        run: npm exec -- playwright install --no-shell chromium
+      - name: Qualify tarball and real browser
+        run: node scripts/qualify.mjs --output qualification
+      - name: Upload credential-free evidence only
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: qualification-${{ matrix.os }}-node${{ matrix.node }}
+          path: qualification/
+          if-no-files-found: warn
+          retention-days: 7
