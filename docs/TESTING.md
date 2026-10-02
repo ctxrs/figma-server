@@ -104,7 +104,7 @@ prove actual launch and sandbox behavior separately.
 | Layer | Concrete qualification gate | Evidence boundary |
 | --- | --- | --- |
 | Unit | `npm test` and `npm run format:check` pass: URL/schema rejection, state ancestry/permissions, leases, cancellation/timeouts, receipts and artifact ownership. | Fakes establish invariants; they do not establish browser or Figma behavior. |
-| Integration | Production MCP and JSON HTTP reject missing/wrong bearer credentials, hostile Host/Origin, cross-session leases and arbitrary Runtime CDP. Same-file writes serialize across adapters; different-file operations overlap. | Local intercepted editor in a real browser; one trusted local operator, not a multitenant security guarantee. |
+| Integration | Production MCP and JSON HTTP reject missing/wrong bearer credentials, hostile Host/Origin and cross-session lease use. Managed same-file writes serialize across adapters; different-file operations overlap. JavaScript and arbitrary CDP require separate coverage below. | One trusted local operator. Raw JavaScript/CDP are trusted browser authority and can bypass managed file coordination. |
 | Package/e2e | Install the npm archive with production dependencies only outside the checkout, including spaces in paths. CLI init/doctor and exclusive profile locking pass. Real full Chromium passes isolated tabs/PNGs, navigation denial, profile persistence, OS process termination and recovery on native OS/Node rows. | Record OS architecture, browser mode/version and archive SHA. An authored or skipped CI row is not a pass. |
 | Headed fixture | Explicit graphical bootstrap survives opening the login page, excludes concurrent account access, closes and reopens the same profile headlessly. | Xvfb is startup/lifecycle evidence, not human sign-in or desktop integration evidence. |
 | Live/manual | On at least one OS, sign in with an authorized disposable account, reopen headlessly, edit a known disposable Figma design, read back actual properties and rendered results, then close/reopen and restart the browser to check persistence. | Record the exact auth method/file type and observed save UI state, leaving it unknown when no indicator is identifiable. Keep other auth methods, file types, Windows interaction and untested architectures explicitly unproven. |
@@ -143,6 +143,53 @@ a scoped prerelease; each claimed supported configuration needs actual native
 evidence. Keep live screenshots, cookies, profile databases and raw traces
 private. Windows Server headless CI does not prove Windows 11 interactive
 login; Intel execution does not prove Apple silicon.
+
+## v0.2.0: JavaScript and full CDP
+
+v0.2.0 adds `figma.evaluate`, arbitrary `figma.cdp`, `figma.cdp_events` and
+`figma.cdp_close`. The archive-backed Chromium and native results below apply
+to QA candidate 4, SHA-256
+`fc5f63787a8c1e70329c2270dfab6317f06381450625ac2c8906899954a83d32`:
+117,079 bytes, 48 payload files, 42 compiled files and 14 runtime modules.
+This is a validation archive digest, not the digest of a later archive packed
+with final documentation.
+
+| Check | Runtime | Result and scope |
+| --- | --- | --- |
+| Full source baseline | Node 22.22.2 and 24.21.0 | 154/154 passed on each Node, with zero failures or skips, before the two narrow runtime fixes below. |
+| Raw-reopen fix | Both Node versions | Three new regression scenarios and 33 selected nearby guard/lifecycle checks passed on each Node; build and typechecking also passed on each. |
+| SIGINT shutdown fix | Both Node versions | 21 focused checks passed on each Node: two signal, 16 raw/headed lifecycle and three reopen checks, with zero failures or skips; build and typechecking also passed on each. |
+| Independent Chromium fixture | Node 22.22.2, candidate 4 installed payload | 12/12 public MCP and JSON HTTP cases passed against actual Chromium. |
+| Native Figma smoke and restart | Linux, Node 22.22.2, candidate 4 installed CLI and MCP | 17/17 checks passed using the platform's default state directory, without an injected State root. All 48 installed payload files matched the archive; no Design mutation was performed. |
+
+The full suite was not repeated after either narrow fix. Both deltas changed
+only the compiled browser supervisor and its source map; the other 40 compiled
+files retained their prior bytes. Qualification combines the frozen full
+baseline with the focused follow-ups.
+
+The independent Chromium cases covered async JavaScript values and exceptions,
+DOM/input/screenshots, persistent Runtime objects, useful protocol errors,
+events and bounded overflow, nonblocking waits and debugger resumption,
+nonflattened child-target routing, and overlapping agents with scoped detach.
+They also covered authentication and lease ownership, request/result/event
+bounds, cancellation, expiry, late-result rejection and shared-worker lifecycle.
+The fixture finished with zero sessions or leases.
+
+The native smoke exercised page evaluation, DOM queries, mouse movement,
+a clipped screenshot, browser-version queries and Runtime event delivery.
+After both raw connections were detached and the lease released, ordinary
+opening of the same file passed in the same worker generation. The actual CLI
+then shut down on SIGINT and restarted with the same signed-in profile;
+ordinary file opening and release passed again. Both SIGINT shutdowns exited
+0, left zero profile browser processes, removed the daemon lock and freed
+the port. Sign-in was retained, and no manual unlock was needed. This was a
+bounded read-only native smoke, with no Design mutation.
+
+The recorded v0.1 native Design-edit results below remain bound to their older
+runtimes. These new read-only checks do not establish new editing, save
+transactions, cloud durability or platform-wide qualification. The CLI still
+provides setup/login/status/daemon/MCP commands; shell agents use the HTTP API
+to call tools.
 
 ## Recorded native qualification: 2026-10-01
 
@@ -331,7 +378,7 @@ remains a separate gate.
 
 ## Live default-profile qualification: through 2026-10-02 UTC
 
-The final frozen Linux source passed all 139 tests on each of Node 22.22.2 and
+The frozen v0.1 Linux source passed all 139 tests on each of Node 22.22.2 and
 24.21.0, with zero failures or skips. Both runs included enabled headed fixtures
 under Xvfb with sandboxed system Chrome 150.0.7871.124. Build and no-emit
 typechecking exited 0 on both runtimes; their compiled outputs matched. The

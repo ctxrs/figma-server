@@ -142,13 +142,123 @@ and omit fields that are not supported. `lease` is the UUID returned by
 | `figma.export` | `lease`, `format: "png"`, optional locator `node` | A rendered screenshot, not a native Figma node export. |
 | `figma.wait_for` | `lease`, `predicate`, optional `timeout` | Typed expectation; timeout defaults to 10,000 ms, maximum 20,000 ms. |
 | `figma.verify` | `lease`, `expectation` | Verify an observable condition and record a receipt. |
-| `figma.cdp` | `lease`, `command: "Page.getLayoutMetrics"` | Numeric viewport width and height only. No evaluation or arbitrary CDP parameters. |
+| `figma.evaluate` | `lease`, `expression`, optional `await_promise` and `timeout_ms` | Evaluate JavaScript in the owned writer tab; inspect the returned result and `exceptionDetails`. |
+| `figma.cdp` | `lease`, `command`, optional `params` and `scope` | Send an arbitrary CDP method and receive its raw response. Scope is `tab` by default or `browser`. |
+| `figma.cdp_events` | `lease`, optional `scope`, `after`, `limit` and `wait_ms` | Read connection events with a continuation cursor and overflow reporting. |
+| `figma.cdp_close` | `lease`, optional `scope` | Detach that lease/scope connection without stopping the shared browser. |
 
-Browser input is implemented with Playwright. The exposed CDP tool uses a
-fixed `Page.getLayoutMetrics` call and returns only numeric viewport dimensions.
-It provides no caller-supplied JavaScript, cookie/storage access, raw DOM, or
-arbitrary CDP method. `figma.export` does not currently support SVG, PDF, JPEG,
-source images, or Figma's native export settings.
+The JavaScript and full-CDP tools are included in v0.2.0. The CLI handles setup,
+login, status, daemon startup and the MCP proxy. Shell agents call tools through
+the JSON HTTP API below.
+
+Browser input is implemented with Playwright. `figma.export` is a rendered PNG
+helper; it does not provide SVG, PDF, JPEG, source images or native Figma export
+settings. Helper-specific locator, redaction and clipboard rules do not limit
+the authority of raw JavaScript or CDP.
+
+## JavaScript, CDP and events
+
+Acquire a writer lease with `figma.open` and use that same session and lease for
+the following calls. All four raw-browser tools require an owned writer lease.
+The expression runs in the leased page:
+
+```json
+{
+  "lease": "<returned UUID>",
+  "expression": "Promise.resolve({title: document.title, url: location.href})",
+  "await_promise": true
+}
+```
+
+Pass this object to `figma.evaluate`. Expressions accept 1–65,536 characters
+within the ordinary 128 KiB JSON request envelope.
+`await_promise` defaults to `true`; `timeout_ms` defaults to 30,000 and accepts
+1–30,000 ms. The response contains a `status` and the raw Runtime response in
+`result`. A serializable value is at `result.result.value`. JavaScript exceptions
+set `status: "failed"` with `javascript_exception` and retain
+`result.exceptionDetails`. Evaluating page JavaScript does not create a Figma
+plugin API or establish that a design edit saved.
+
+`figma.cdp` accepts a command string without a method whitelist. For example:
+
+```json
+{
+  "lease": "<returned UUID>",
+  "command": "Runtime.evaluate",
+  "params": {"expression": "document.title", "returnByValue": true},
+  "scope": "tab"
+}
+```
+
+Commands use `Domain.method` syntax, up to 200 characters; there is no method
+whitelist. `params` defaults to `{}`. Successful calls return
+`{"status":"completed","result":<raw protocol response>}`. Protocol failures
+return `status: "failed"` with useful protocol information. Raw results are
+unredacted and limited to 1 MiB. An output-limit failure can follow a command
+that already took effect; inspect before repeating it.
+
+`tab` is the default scope and uses the managed leased tab. `browser`
+scope uses the shared account's browser, for example `Browser.getVersion`.
+Managed file leases coordinate the ordinary file workflow. Raw JavaScript and
+CDP are trusted browser authority and can bypass that coordination: a tab can
+navigate to another file or use cross-target/shared-state commands. Browser
+scope can control all targets in the shared account's browser. Many agents can
+use the worker concurrently.
+
+Each lease/scope pair keeps a persistent connection, so enabled domains and
+event subscriptions survive successive calls. Enable a domain such as
+`Runtime.enable`, then call `figma.cdp_events` for the same lease and scope.
+Use its returned cursor as `after` on the next poll. `limit` bounds a batch and
+`wait_ms` can wait for events without holding up commands on the same lease.
+`after` defaults to 0, `limit` to 100 (range 1–100), and `wait_ms` to 0 (range
+0–10,000 ms). Responses include `events`, `cursor`, `has_more`, `oldest_cursor`,
+`dropped_events` and `closed`. Each event has a numeric `sequence`, its protocol
+`method` and any `params`.
+
+The connection retains at most 512 events within a 1 MiB buffer budget.
+`dropped_events` is cumulative loss reporting; `oldest_cursor` identifies the
+retained frontier. Check these fields before treating the history as complete.
+Continue from `cursor`, polling again while `has_more` is true. After detaching
+and opening a new connection, start again with `after: 0`.
+
+```text
+figma.cdp({"lease":"<returned UUID>","command":"Runtime.enable"})
+figma.cdp_events({"lease":"<returned UUID>","scope":"tab"})
+  -> keep the returned cursor and check overflow
+figma.cdp_events({"lease":"<returned UUID>","scope":"tab","after":<returned cursor>})
+figma.cdp_close({"lease":"<returned UUID>","scope":"tab"})
+```
+
+`figma.cdp_close` detaches only the requested connection. It does not release
+the file lease or stop the shared browser worker. Release the lease when done.
+Raw targets created through CDP are outside the eight managed-tab slots;
+their caller closes them with `Target.closeTarget`, or browser shutdown ends
+them.
+
+Keep the identifiers separate. `lease` identifies the server-owned file tab;
+the `targetId` returned by `figma.open` is an opaque broker handle, not Chrome's
+native target ID. Do not pass that broker handle to CDP `Target.*` methods.
+For the native ID, call tab-scope `Target.getTargetInfo` and read
+`result.targetInfo.targetId`, or list `result.targetInfos` with browser-scope
+`Target.getTargets`. A CDP attachment's `sessionId` identifies that child
+protocol connection; it is separate from the MCP/HTTP client session ID.
+
+```text
+figma.cdp({"lease":"<returned UUID>","command":"Target.getTargetInfo"})
+  -> keep result.targetInfo.targetId as the native target ID
+figma.cdp({"lease":"<returned UUID>","scope":"browser","command":"Target.attachToTarget","params":{"targetId":"<native target ID>","flatten":false}})
+  -> keep result.sessionId as the child CDP session ID
+figma.cdp({"lease":"<returned UUID>","scope":"browser","command":"Target.sendMessageToTarget","params":{"sessionId":"<child CDP session ID>","message":"{\"id\":1,\"method\":\"Runtime.evaluate\",\"params\":{\"expression\":\"document.title\",\"returnByValue\":true}}"}})
+figma.cdp_events({"lease":"<returned UUID>","scope":"browser","wait_ms":1000})
+  -> continue from cursor until Target.receivedMessageFromTarget matches the child sessionId
+  -> parse params.message and match id 1
+figma.cdp({"lease":"<returned UUID>","scope":"browser","command":"Target.detachFromTarget","params":{"sessionId":"<child CDP session ID>"}})
+```
+
+This child routing is nonflattened. The child `sessionId` is a protocol
+parameter; `figma.cdp` has no top-level `sessionId` routing field. The server
+does not expose a native WebSocket debugging port. Close any raw-created
+target you own when finished.
 
 ## Working with the editor
 
@@ -161,11 +271,16 @@ Start with inspection and a screenshot. For editing, choose a test file and
 state a visible expectation. Do not infer that a layer exists, is editable, or
 has saved merely because a click or paste was dispatched.
 
-Use `mode: "read"` explicitly for inspection. The default is a writer lease;
+The server admits up to 32 client sessions and eight managed file tabs. Raw
+CDP-created targets do not consume those managed-tab slots. Client sessions
+and leases are temporary; they do not hold the persistent Figma login.
+
+Use `mode: "read"` explicitly for helper inspection. The default is a writer lease;
 it holds the server's file write lock until release or cleanup. A second writer
 for the same file waits up to 30 seconds before `file_busy`. Writers of other
 files can proceed separately. Human collaborators and other tools are outside
-this lock, and reads do not receive a consistent snapshot.
+this lock, and reads do not receive a consistent snapshot. Raw JavaScript/CDP
+can bypass this managed coordination in either scope.
 
 Leases and logical sessions expire after two minutes without renewal. Use
 `figma.heartbeat` during a long pause. A lease belongs to the session that
@@ -189,7 +304,8 @@ Separate leases therefore do not make these tabs isolated browser tenants.
 including Ctrl/Meta+C/X/V, clipboard Insert/Delete aliases, and Figma's
 Paste to replace shortcut. Copy/paste reached through menus or coordinate
 clicks is unsupported during concurrent work; the keyboard guard cannot
-isolate those paths.
+isolate those paths. JavaScript and raw CDP can also access shared clipboard
+state; the keypress helper's guard is specific to that helper.
 
 Use `figma.type_text` or `figma.fill` with explicit text supplied in each call.
 For duplication, use Figma's native Duplicate shortcut (`Control+D` or
@@ -295,6 +411,11 @@ PNG image content for the agent to see. Its `isError` flag is set for `failed`
 and `indeterminate` receipts, but not for `unverified`. Inspect the receipt's
 status even when the MCP host presents the tool call as successful.
 
+Evaluation and CDP return their own status and raw protocol result, rather than
+an editing receipt. A completed protocol command does not verify a saved
+design change. Inspect `result.exceptionDetails` for evaluation errors and
+the returned status before continuing.
+
 ## Direct MCP over HTTP
 
 The `/mcp` endpoint uses the SDK's supported, initialized Streamable HTTP
@@ -342,6 +463,17 @@ Use the returned `lease` with `/api/tools/figma.inspect`, then
 `/api/tools/figma.release`, keeping the same session header. Close the session
 when finished. Account readiness alone does not bypass lease ownership.
 
+For JavaScript, open with `mode: "write"`, then post to
+`/api/tools/figma.evaluate` with the same session header:
+
+```json
+{"lease":"<returned UUID>","expression":"document.title","await_promise":true}
+```
+
+CDP uses `/api/tools/figma.cdp`, event polling `/api/tools/figma.cdp_events`, and
+detachment `/api/tools/figma.cdp_close`, with the tool arguments above. Release
+the file lease and close the client session when finished.
+
 HTTP failures return `{"error":{"code":"...","message":"..."}}`.
 A returned receipt can still have `failed`, `indeterminate`, or `unverified`
 status with HTTP 200; check its body before reporting success.
@@ -383,8 +515,10 @@ event. Acceptance does not establish that Figma inserted editable layers.
 
 ## Errors and recovery
 
-Errors expose a stable code and message. Browser errors are replaced with a
-generic `operation_failed` message instead of forwarding raw browser details.
+Errors expose a stable code and message. Convenience tools replace unexpected
+browser errors with `operation_failed`. Raw CDP failures retain protocol
+information; evaluation exceptions retain `result.exceptionDetails`. A raw
+failure can include `effectsMayHaveOccurred: true`.
 
 | Code or symptom | Recovery |
 | --- | --- |
@@ -404,7 +538,12 @@ generic `operation_failed` message instead of forwarding raw browser details.
 | `read_only` | Check both lease mode and Figma permissions. A writer lease does not grant edit access to a view-only file. |
 | `editing_unsupported` | The visible editor did not expose the required editing toolbar. Inspect the file type and permissions instead of assuming write access. |
 | `ambiguous_locator` / `unsupported_readback` | Read one exact visible editable field; inspect its current label and selection. |
-| `credential_field_denied` | Read only ordinary editor fields. Credential or hidden fields cannot be read. |
+| `credential_field_denied` | The `read_value` helper reads ordinary visible editor fields and denies credential/hidden fields. This is a helper-specific rule. |
+| `javascript_exception` | Inspect `result.exceptionDetails` and the expression's effects before continuing. |
+| `cdp_protocol_error` | Read the protocol message and check the method, parameters and scope. |
+| `cdp_output_limit` | Return less data; the command may already have taken effect. |
+| `invalid_cursor` | Use a cursor from this connection; restart with `after: 0` after detachment/reconnection. |
+| `cdp_session_closed` | Detach the closed connection and open a new one using a valid owned writer lease. |
 | `file_busy` | Another writer holds the file. Wait for it to finish; do not force-close its tab. |
 | `indeterminate` | The operation or target closure could not be confirmed. Inspect the file before retrying; a quarantined file can require daemon recovery. |
 | An unverified edit or lost response | Inspect the editor and evidence before repeating the action. The change may already have happened. |

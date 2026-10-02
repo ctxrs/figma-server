@@ -12,6 +12,7 @@ export const LIMITS = Object.freeze({
   uploadBodyBytes: 4 * Math.ceil(8 * 1024 * 1024 / 3) + 16 * 1024,
   uploadMetadataBytes: 16 * 1024,
   uploads: 2, imageDimension: 8192, imagePixels: 16 * 1024 * 1024,
+  cdpResultBytes: 1024 * 1024, cdpEventBytes: 1024 * 1024, cdpEvents: 512,
 });
 export const accountName = z.string().regex(/^[a-zA-Z0-9_-]{1,40}$/);
 export const figmaOrigin = 'https://www.figma.com';

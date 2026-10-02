@@ -98,12 +98,12 @@ test('real Chromium behind MCP and HTTP: auth, ownership, artifacts and shared w
   assert.equal(core.sessions.leases.size, 2);
   const denied = await request('/api/tools/figma.inspect', 'POST', { lease: beta.lease }, { 'X-Figma-Session': session });
   assert.equal(denied.status, 404); await denied.arrayBuffer();
-  const unsafeCdp = await request('/api/tools/figma.cdp', 'POST', {
-    lease: alpha.lease, command: 'Runtime.evaluate', params: { expression: 'document.cookie' },
-  }, { 'X-Figma-Session': session });
-  assert.equal(unsafeCdp.status, 400); await unsafeCdp.arrayBuffer();
+  const evaluation = await httpTool('figma.cdp', {
+    lease: alpha.lease, command: 'Runtime.evaluate', params: { expression: 'Promise.resolve(42)', awaitPromise: true, returnByValue: true },
+  });
+  assert.equal(evaluation.result.result.value, 42);
   const metrics = await httpTool('figma.cdp', { lease: alpha.lease, command: 'Page.getLayoutMetrics' });
-  assert.equal(metrics.width, 1920);
+  assert.equal(metrics.result.cssLayoutViewport.clientWidth, 1920);
 
   const [alphaReceipt, betaReceipt] = await Promise.all([
     httpTool('figma.fill', { lease: alpha.lease, locator: { by: 'label', name: 'Description' }, text: 'HTTP tab marker' }),

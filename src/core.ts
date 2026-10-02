@@ -6,6 +6,7 @@ import { LIMITS, safeHtml, suppliedImage, type Expectation } from './security.js
 import { SessionManager, type Lease } from './session-manager.js';
 import { Metadata, State } from './state.js';
 import { parseTool, type ToolInput, type ToolName } from './tools.js';
+import { cdpFailure, cdpJson } from './cdp.js';
 
 const writes = new Set<ToolName>(['figma.click', 'figma.pointer_click', 'figma.type_text', 'figma.wheel', 'figma.fill', 'figma.keypress', 'figma.drag', 'figma.paste_html', 'figma.upload_image']);
 export class Core {
@@ -45,6 +46,39 @@ export class Core {
         const input = parsed.input as ToolInput<'figma.artifact_read'>;
         await this.artifacts.read(session, input.job_id, input.file);
         return { artifact: `artifacts/${input.job_id}/${input.file}`, kind: 'rendered_png' };
+      }
+      case 'figma.evaluate': {
+        const input = parsed.input as ToolInput<'figma.evaluate'>;
+        return this.sessions.executeRaw(session, input.lease, 'tab', async lease => {
+          if (!lease.tab.cdp) fault('cdp_unsupported', 'This browser adapter does not expose raw CDP.', 409);
+          const reply = await lease.tab.cdp('tab', 'Runtime.evaluate', { expression: input.expression,
+            awaitPromise: input.await_promise, returnByValue: true, timeout: input.timeout_ms, userGesture: false });
+          if (reply.status === 'failed') return reply;
+          const result = reply.result as { exceptionDetails?: unknown };
+          return result.exceptionDetails ? { ...reply, status: 'failed', error: { code: 'javascript_exception', message: 'JavaScript threw; inspect exceptionDetails.' } } : reply;
+        }, signal, input.timeout_ms);
+      }
+      case 'figma.cdp': {
+        const input = parsed.input as ToolInput<'figma.cdp'>;
+        return this.sessions.executeRaw(session, input.lease, input.scope, async lease => {
+          if (!lease.tab.cdp) fault('cdp_unsupported', 'This browser adapter does not expose raw CDP.', 409);
+          return lease.tab.cdp(input.scope, input.command, input.params);
+        }, signal);
+      }
+      case 'figma.cdp_events': {
+        const input = parsed.input as ToolInput<'figma.cdp_events'>;
+        return this.sessions.executeRaw(session, input.lease, input.scope, async (lease, combined) => {
+          if (!lease.tab.cdpEvents) fault('cdp_unsupported', 'This browser adapter does not expose raw CDP events.', 409);
+          const result = await lease.tab.cdpEvents(input.scope, input.after, input.limit, input.wait_ms, combined);
+          try { cdpJson(result); return result; } catch (error) { return cdpFailure('cdp_output_limit', error); }
+        }, signal);
+      }
+      case 'figma.cdp_close': {
+        const input = parsed.input as ToolInput<'figma.cdp_close'>;
+        return this.sessions.executeRaw(session, input.lease, input.scope, async lease => {
+          if (!lease.tab.closeCdp) fault('cdp_unsupported', 'This browser adapter does not expose raw CDP.', 409);
+          await lease.tab.closeCdp(input.scope); return { status: 'completed', detached: true };
+        }, signal);
       }
       case 'figma.upload_image': {
         const input = parsed.input as ToolInput<'figma.upload_image'>;
@@ -124,7 +158,6 @@ export class Core {
           }
           return verification;
         }
-        case 'figma.cdp': return lease.tab.metrics();
         default: return fault('unknown_tool', 'Unknown tool.', 404);
       }
     }, signal);

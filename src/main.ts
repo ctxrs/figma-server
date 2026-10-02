@@ -185,7 +185,7 @@ export async function serve(core: Core, options: HttpOptions): Promise<{ url: st
           if (req.method !== 'POST' || !isInitializeRequest(payload)) fault('initialize_required', 'Initialize an MCP session first.', 400);
           const coreId = core.sessions.createSession();
           const signals = new Map<string | number, AbortSignal>();
-          const sdk = new McpServer({ name: 'figma-server', version: '0.1.0' });
+          const sdk = new McpServer({ name: 'figma-server', version: '0.2.0' });
           for (const [name, schema] of Object.entries(toolSchemas)) {
             sdk.registerTool(name, { description: toolDescriptions[name as keyof typeof toolDescriptions], inputSchema: schema }, async (args: unknown, extra: { signal: AbortSignal; requestId: string | number }) => {
               try {

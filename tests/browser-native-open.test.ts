@@ -63,6 +63,7 @@ async function environment(t: TestContext, options: Options = {}) {
   let context!: BrowserContext;
   const dispatched: string[] = [];
   const blockedChildErrorDocuments: boolean[] = [];
+  const foreignDashboardChildCommits: boolean[] = [];
   const metadataBodyErrors: string[] = [];
   let pressureResponses = 0;
   let hold!: () => void;
@@ -72,6 +73,7 @@ async function environment(t: TestContext, options: Options = {}) {
     context = await chromium.launchPersistentContext(profile, settings);
     context.on('page', page => page.on('framenavigated', frame => {
       if (frame.url() === 'chrome-error://chromewebdata/') blockedChildErrorDocuments.push(frame !== page.mainFrame());
+      if (frame.url() === 'https://external.invalid/blocked-dashboard-frame') foreignDashboardChildCommits.push(frame !== page.mainFrame());
     }));
     await context.route('**/*', async route => {
       const request = route.request(), url = new URL(request.url());
@@ -137,7 +139,7 @@ async function environment(t: TestContext, options: Options = {}) {
   const browser = new BrowserSupervisor(state, await state.config(), launcher);
   const manager = new SessionManager(browser, await Metadata.open(state));
   t.after(async () => { hold(); await manager.stop(); await rm(root, { recursive: true, force: true }); });
-  return { browser, manager, context: () => context, dispatched, hold, blockedChildErrorDocuments, metadataBodyErrors, pressureResponses: () => pressureResponses };
+  return { browser, manager, context: () => context, dispatched, hold, blockedChildErrorDocuments, foreignDashboardChildCommits, metadataBodyErrors, pressureResponses: () => pressureResponses };
 }
 async function until(check: () => boolean | Promise<boolean>, ms = 5000) {
   const deadline = Date.now() + ms;
@@ -180,6 +182,45 @@ test('qualified metadata arriving before canvas and duplicate native controls wa
   assert.equal(await target(env.context(), alpha).getByTestId('Text-tool').count(), 2);
   await tab.close();
 });
+
+test('normal broker release and reopen after raw grant tolerates a foreign dashboard child while another lease stays healthy', { timeout: 20_000 }, async t => {
+  const env = await environment(t, { dashboardBlockedFrame: true }); if (!env) return;
+  const a = env.manager.createSession(), b = env.manager.createSession();
+  const first = await env.manager.open(a, 'default', file(alpha), 'write');
+  const other = await env.manager.open(b, 'default', file(beta), 'write');
+  assert.deepEqual(env.foreignDashboardChildCommits, []);
+  assert.ok(!env.dispatched.includes('https://external.invalid/blocked-dashboard-frame'), 'Ordinary UI opening still denies the foreign child before raw grant.');
+  const reply = await env.manager.executeRaw(a, first.lease as string, 'tab', lease =>
+    lease.tab.cdp!('tab', 'Runtime.evaluate', { expression: '6*7', returnByValue: true }));
+  assert.equal(reply.status, 'completed');
+  await env.manager.release(a, first.lease as string);
+  const reopened = await env.manager.open(a, 'default', file(alpha), 'write').finally(() => {
+    assert.deepEqual(env.foreignDashboardChildCommits, [true], 'Exactly one admitted foreign child committed during the reopen.');
+    t.diagnostic('Controlled foreign child commit observed after raw grant; main dashboard remained the requested opener.');
+  });
+  assert.equal(reopened.fileKey, alpha);
+  await env.manager.get(a, reopened.lease as string).tab.check(true);
+  assert.ok(env.dispatched.includes('https://external.invalid/blocked-dashboard-frame'));
+  await env.manager.get(b, other.lease as string).tab.check(true);
+  await env.manager.release(a, reopened.lease as string); await env.manager.release(b, other.lease as string);
+  assert.equal(env.context().pages().length, 1);
+});
+
+for (const invalid of ['wrong-file metadata', 'subframe metadata'] as const) {
+  test(`normal broker opening after raw grant rejects ${invalid} as requested main-document identity`, { timeout: 20_000 }, async t => {
+    const options: Options = {};
+    const env = await environment(t, options); if (!env) return;
+    const session = env.manager.createSession();
+    const first = await env.manager.open(session, 'default', file(alpha), 'write');
+    await env.manager.executeRaw(session, first.lease as string, 'tab', lease =>
+      lease.tab.cdp!('tab', 'Runtime.evaluate', { expression: '42', returnByValue: true }));
+    await env.manager.release(session, first.lease as string);
+    if (invalid === 'wrong-file metadata') options.wrongIdentity = true;
+    else { options.noIdentity = true; options.subframe = true; }
+    await assert.rejects(env.manager.open(session, 'default', file(alpha), 'write'), { code: 'ui_unsupported' });
+    assert.equal(env.manager.leases.size, 0); assert.equal(env.context().pages().length, 1);
+  });
+}
 
 test('retained metadata cannot survive a document epoch replacement while the editor is delayed', { timeout: 20_000 }, async t => {
   const env = await environment(t, { editorDelay: 1200 }); if (!env) return;

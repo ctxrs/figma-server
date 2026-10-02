@@ -4,11 +4,13 @@ import { Fault, fault } from './errors.js';
 import { LIMITS, fileUrl } from './security.js';
 import { FileLocks, TargetQueue, bounded } from './scheduler.js';
 import type { Metadata } from './state.js';
+import type { CdpScope } from './cdp.js';
 
 export type Lease = {
   id: string; session: string; account: string; fileKey: string; target: string; generation: string;
   touched: number; mode: 'read' | 'write'; tab: BrowserTab; queue: TargetQueue;
   invalid: boolean; unlock?: () => void; closing?: Promise<void>; quarantined: boolean;
+  rawRevoked?: boolean; browserEnded?: boolean;
 };
 type Session = { id: string; touched: number; controller: AbortController };
 export class SessionManager {
@@ -122,8 +124,40 @@ export class SessionManager {
   }
   async release(session: string, id: string): Promise<Record<string, unknown>> {
     const value = this.get(session, id);
+    value.rawRevoked = true;
     await this.closeLease(value);
     return { released: true };
+  }
+  async executeRaw<T>(session: string, id: string, scope: CdpScope, task: (lease: Lease, signal: AbortSignal) => Promise<T>,
+    signal?: AbortSignal, timeout: number = LIMITS.operationMs): Promise<T> {
+    const lease = this.get(session, id, true);
+    const owner = this.session(session);
+    const combined = signal ? AbortSignal.any([signal, owner.controller.signal]) : owner.controller.signal;
+    const run = async () => {
+      this.get(session, id, true);
+      if (!lease.tab.checkRaw) fault('cdp_unsupported', 'This browser adapter does not expose raw CDP.', 409);
+      return bounded((async () => {
+        await lease.tab.checkRaw!(scope);
+        this.get(session, id, true);
+        const result = await task(lease, combined);
+        // A successful raw command may deliberately close its target/browser.
+        // Check the logical caller, not an editor postcondition or live target.
+        combined.throwIfAborted(); this.session(session);
+        if (lease.rawRevoked || lease.invalid && !lease.browserEnded || lease.touched + LIMITS.leaseMs <= this.now()) {
+          fault('indeterminate', 'The raw handle was released, invalidated or expired; its late result was discarded. Effects may have occurred.', 409);
+        }
+        return result;
+      })(), combined, timeout);
+    };
+    // Debugger/Fetch commands can pause other RPCs on this exact connection.
+    // They must remain concurrent so resume/continue/event calls can complete.
+    try { return await run(); }
+    catch (error) {
+      lease.rawRevoked = true;
+      await this.closeLease(lease);
+      if (combined.aborted) fault('indeterminate', 'Raw operation cancelled; owned target cleanup completed or quarantined.', 409);
+      throw error;
+    }
   }
   async closeLease(lease: Lease): Promise<void> {
     if (lease.closing) return lease.closing;
@@ -158,7 +192,10 @@ export class SessionManager {
   }
   async invalidateAccount(account: string, retryClosure = false): Promise<void> {
     if (retryClosure) {
-      for (const lease of this.leases.values()) if (lease.account === account && lease.quarantined) lease.closing = undefined;
+      for (const lease of this.leases.values()) if (lease.account === account) {
+        lease.browserEnded = true;
+        if (lease.quarantined) lease.closing = undefined;
+      }
     }
     await Promise.allSettled([...this.leases.values()].filter(l => l.account === account).map(l => this.closeLease(l)));
   }
@@ -174,7 +211,9 @@ export class SessionManager {
   }
   async sweep(): Promise<void> {
     for (const lease of [...this.leases.values()]) {
-      if (lease.touched + LIMITS.leaseMs <= this.now() && !lease.invalid) await this.closeLease(lease).catch(() => undefined);
+      if (lease.touched + LIMITS.leaseMs <= this.now() && !lease.invalid) {
+        lease.rawRevoked = true; await this.closeLease(lease).catch(() => undefined);
+      }
     }
     for (const session of [...this.sessions.values()]) {
       if (session.touched + LIMITS.leaseMs <= this.now()) await this.closeSession(session.id);

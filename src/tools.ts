@@ -4,6 +4,7 @@ import { fault } from './errors.js';
 
 const lease = z.string().uuid();
 const expectation = expectationSchema.optional();
+const cdpScope = z.enum(['tab', 'browser']).default('tab');
 function sharedClipboardShortcut(keys: string): boolean {
   const parts = keys.toLowerCase().split('+').map(part => part.replace(/(?:left|right)$/, ''));
   const physical = parts.at(-1)?.replace(/^key/, '');
@@ -38,8 +39,13 @@ export const toolSchemas = {
   'figma.export': z.object({ lease, format: z.literal('png'), node: locatorSchema.optional() }).strict(),
   'figma.wait_for': z.object({ lease, predicate: expectationSchema, timeout: z.number().int().min(1).max(20_000).default(10_000) }).strict(),
   'figma.verify': z.object({ lease, expectation: expectationSchema }).strict(),
-  // No arbitrary method, expression, parameters, DOM or network return values.
-  'figma.cdp': z.object({ lease, command: z.literal('Page.getLayoutMetrics') }).strict(),
+  'figma.evaluate': z.object({ lease, expression: z.string().min(1).max(64 * 1024),
+    await_promise: z.boolean().default(true), timeout_ms: z.number().int().min(1).max(LIMITS.operationMs).default(LIMITS.operationMs) }).strict(),
+  'figma.cdp': z.object({ lease, command: z.string().max(200).regex(/^[A-Za-z][A-Za-z0-9_]*\.[A-Za-z][A-Za-z0-9_]*$/),
+    params: z.record(z.string(), z.unknown()).default({}), scope: cdpScope }).strict(),
+  'figma.cdp_events': z.object({ lease, scope: cdpScope, after: z.number().int().min(0).default(0),
+    limit: z.number().int().min(1).max(100).default(100), wait_ms: z.number().int().min(0).max(10_000).default(0) }).strict(),
+  'figma.cdp_close': z.object({ lease, scope: cdpScope }).strict(),
 } as const;
 export type ToolName = keyof typeof toolSchemas;
 export type ToolInput<N extends ToolName> = z.infer<(typeof toolSchemas)[N]>;
@@ -65,7 +71,10 @@ export const toolDescriptions: Record<ToolName, string> = {
   'figma.export': 'Capture a rendered PNG viewport or accessible element. This is not a native node export.',
   'figma.wait_for': 'Wait for a bounded typed visible or saved-state predicate.',
   'figma.verify': 'Record a receipt for an observed typed postcondition, or mark it unverified.',
-  'figma.cdp': 'Read numeric page layout metrics only. Runtime evaluation and all other CDP commands are disabled.',
+  'figma.evaluate': 'Run arbitrary JavaScript in an owned writer tab. Returns the Runtime remote object and exception details; not a saved-edit guarantee. Trusted operators can bypass UI and credential restrictions.',
+  'figma.cdp': 'Send any CDP method/parameters on a persistent lease+scope connection. Default tab; browser scope shares the account worker and can affect other agents or bypass file locks. Use non-flattened Target sessions and Target.sendMessageToTarget for nested messages. Raw results are unredacted and bounded to 1 MiB.',
+  'figma.cdp_events': 'Read all CDP events from this lease+scope connection by cursor, optionally waiting up to 10 seconds. Reports buffer loss explicitly. Commands must enable their protocol domains. At most 512 events/1 MiB retained.',
+  'figma.cdp_close': 'Detach only this lease+scope CDP connection. Reopening creates a new connection and event cursor. Raw-created targets remain until explicitly closed or browser shutdown; trusted raw navigation lasts for this worker generation.',
 };
 export function parseTool(name: string, input: unknown): { name: ToolName; input: unknown } {
   if (!Object.hasOwn(toolSchemas, name)) fault('unknown_tool', 'Unknown tool.', 404);

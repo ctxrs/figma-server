@@ -89,5 +89,5 @@ export async function editorFixture(html: string, headed = false): Promise<{ cor
   };
   const browser = new BrowserSupervisor(state, await state.config(), launcher);
   const core = new Core(browser, state, await Metadata.open(state));
-  return { core, state, context: () => context, cleanup: async () => { await core.stop(); await rm(root, { recursive: true, force: true }); } };
+  return { core, state, context: () => context, cleanup: async () => { await core.stop(); await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); } };
 }

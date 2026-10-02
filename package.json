@@ -1,6 +1,6 @@
 {
   "name": "@ctxrs/figma-server",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A local MCP-over-HTTP bridge for real Figma browser sessions",
   "license": "Apache-2.0",
   "repository": { "type": "git", "url": "https://github.com/ctxrs/figma-server.git" },

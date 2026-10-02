@@ -33,10 +33,15 @@ for (const headed of [false, true]) test(`owned click/drag modifiers span actual
   const env = await editorFixture(fixture, headed); t.after(env.cleanup);
   const session = env.core.sessions.createSession(), lease = await open(env.core, session);
   const page = env.context().pages().find(page => page.url().includes('/design/'))!;
-  if (headed) await page.bringToFront(); // Only the isolated Xvfb fixture display.
+  if (headed) {
+    await page.bringToFront(); // Only the isolated Xvfb fixture display.
+    // Foregrounding can finish before Chrome has a capturable compositor frame.
+    await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  }
   const events = () => page.evaluate(() => (window as unknown as { events: MouseEvent[] }).events);
   const clear = () => page.evaluate(() => { (window as unknown as { events: MouseEvent[] }).events = []; });
-  await env.core.call(session, 'figma.click', { lease: lease.lease, locator: { by: 'role', role: 'button', name: 'Select' }, modifiers: ['Shift', 'Alt'] });
+  const clicked = await env.core.call(session, 'figma.click', { lease: lease.lease, locator: { by: 'role', role: 'button', name: 'Select' }, modifiers: ['Shift', 'Alt'] }) as { status: string };
+  assert.ok(clicked.status === 'verified' || clicked.status === 'unverified', JSON.stringify(clicked));
   assert.ok((await events()).filter(event => event.type === 'mousedown' || event.type === 'click').every(event => event.shift && event.alt));
   await clear();
   await env.core.call(session, 'figma.pointer_click', { lease: lease.lease, point: { x: 100, y: 150 }, modifiers: ['ControlOrMeta', process.platform === 'darwin' ? 'Meta' : 'Control'] });

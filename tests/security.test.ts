@@ -52,12 +52,14 @@ test('redaction removes short synthetic secrets, structured fields and complete 
   assert.match(redact('{"safe":"hello","password":"p"}'), /hello/);
 });
 
-test('strict CDP and pointer schemas reject evaluation, arbitrary params and unbounded inputs', () => {
+test('raw CDP accepts arbitrary protocol methods while strict envelopes and input bounds remain', () => {
   const lease = 'a66028b1-1369-49a5-b1a3-bbdf60c6e714';
-  for (const command of ['Runtime.evaluate', 'Network.getAllCookies', 'Browser.close', 'Page.navigate', 'DOM.getDocument']) {
-    assert.throws(() => parseTool('figma.cdp', { lease, command }));
+  for (const command of ['Runtime.evaluate', 'Debugger.resume', 'Browser.close', 'Page.navigate', 'DOM.getDocument', 'UnknownDomain.customMethod']) {
+    assert.equal(parseTool('figma.cdp', { lease, command, params: { arbitrary: { nested: true } } }).name, 'figma.cdp');
   }
-  assert.throws(() => parseTool('figma.cdp', { lease, command: 'Page.getLayoutMetrics', params: {} }));
+  assert.throws(() => parseTool('figma.cdp', { lease, command: 'invalid method' }));
+  assert.throws(() => parseTool('figma.cdp', { lease, command: 'Runtime.evaluate', expression: '42' }));
+  assert.throws(() => parseTool('figma.evaluate', { lease, expression: 'x'.repeat(65537) }));
   assert.throws(() => parseTool('figma.pointer_click', { lease, point: { x: -1, y: 10 } }));
   assert.throws(() => parseTool('figma.type_text', { lease, text: 'x'.repeat(5000) }));
   assert.throws(() => parseTool('figma.open', { file_url: 'x', parallel: true }));

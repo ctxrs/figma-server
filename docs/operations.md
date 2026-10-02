@@ -136,6 +136,12 @@ The browser profile holds the Figma web session. `secret` holds the separate
 local bearer token. Do not copy either into source control, MCP JSON, or an
 issue report. SQLite stores lease/job metadata, not the browser profile.
 
+The profile keeps the signed-in Figma session across browser and daemon
+restarts, until Figma expires it or requests sign-in again. MCP and HTTP client
+sessions and file leases have their own lifetimes; closing a client does not
+erase that login. The CLI manages setup, login, status, server startup and the
+MCP proxy. Agents with shell access call tools through the JSON HTTP API.
+
 Configuration is JSON. The minimal shape is:
 
 ```json
@@ -243,9 +249,26 @@ redacted.
 Keep the local daemon on loopback and use the MCP proxy for the first run.
 The HTTP boundary checks the Host and Origin headers and requires the local
 bearer token. The proxy supplies that credential without putting it in agent
-configuration. Tools do not provide arbitrary CDP evaluation or cookie access.
-These controls do not isolate mutually untrusted clients sharing one local
-credential. Treat this as a service for your own trusted agents.
+configuration. Use this service with your own trusted agents: JavaScript and
+full CDP have the authority of its dedicated browser. Raw results are
+unredacted and size bounded. These tools are included in v0.2.0; see
+[agent tools](agent-tools.md#javascript-cdp-and-events) for arguments and examples.
+
+Tab-scope CDP starts from the managed leased tab. Raw JavaScript/CDP can navigate
+that tab to another file or use cross-target/shared-state commands, bypassing
+managed file coordination. Browser scope can control all targets in the shared
+account's browser. Many agents may use it concurrently. `figma.cdp_close` detaches a lease/scope
+connection; it does not stop the shared browser or release the file lease.
+Raw-created targets are outside the eight managed-tab slots and remain their
+caller's responsibility until closed or the browser stops.
+
+Attaching raw CDP puts the shared account worker into trusted raw control for
+that browser generation, allowing navigation, popups and downloads throughout
+the shared worker. This transition persists until a browser restart; closing
+CDP connections or releasing leases does not restore the restrictions. Stop
+and restart the daemon when you need a fresh worker. Its dedicated profile
+still retains the Figma login.
+
 Concurrent tabs also share a clipboard; see
 [clipboard limits and supported alternatives](agent-tools.md#clipboard-and-concurrent-tabs).
 
@@ -266,7 +289,7 @@ a raw Chromium debugging endpoint.
 | Chromium executable is missing | Run `figma-server browser-install`, or stop the daemon and select an installed browser with `init --browser`. |
 | Browser fails before displaying Figma | Check system libraries, the display for headed login, and the configured executable. |
 | Chromium reports no usable sandbox | Keep the sandbox enabled. Stop the daemon, then try `figma-server init --browser /usr/bin/google-chrome` if system Chrome is installed on Linux. Check host policy and dependencies. |
-| The install URL returns 404 | The planned candidate asset may not be published yet. Use a supplied archive or the source instructions; do not infer npm registry availability. |
+| The install URL returns 404 | Check the release tag and archive filename in the URL. Install a downloaded release archive if needed. |
 | Global npm install fails on permissions | Use a Node/npm installation or global prefix writable by your OS account. Run setup, the daemon, and the MCP client as the same account. |
 | The agent cannot find the MCP command | Check its PATH or use an absolute launcher path; see [MCP launcher setup](#mcp-launcher-setup). |
 | `status` reports a stopped daemon | Keep `figma-server run` open in another terminal. The MCP proxy does not start it. |

@@ -6,28 +6,28 @@ Run a dedicated Figma browser for your agents.
 through local Chromium. Sign in once in its dedicated browser profile and reuse
 that session across agents until Figma asks you to sign in again.
 
-An agent can inspect the visible editor, take screenshots, and send clicks,
-text, keyboard shortcuts, and drags. It can hold modifiers for a gesture and
-supply PNG/JPEG bytes to an editor file chooser.
+Agents can inspect the editor, take screenshots, and send clicks, text,
+keyboard shortcuts and drags. JavaScript evaluation and full CDP give your
+trusted agents direct access to the page and browser, alongside those
+convenience tools.
 
 Connect through MCP stdio, or call the JSON HTTP API from your own tooling.
 Keep the same browser setup when you switch agent clients or model providers.
 There is no model-provider allowlist. The service runs independently of Figma's
 official MCP server.
 
-The browser profile and local service credential stay on your machine. Figma
-still uses its cloud service, and tool results and screenshots go to your agent
+The dedicated browser profile lives on your machine. Figma still uses its
+cloud service, and tool results and screenshots go to your agent
 client and any model provider it uses. Choose the agent accordingly.
 
 ## Install
 
 You need **Node.js 22.16.0 or newer**, npm, and a graphical desktop for sign-in.
 
-v0.1.0 is a prerelease. See the [tested configurations](docs/TESTING.md) for
-native workflow coverage.
+Install the v0.2.0 prerelease archive:
 
 ```sh
-npm install --global https://github.com/ctxrs/figma-server/releases/download/v0.1.0/ctxrs-figma-server-0.1.0.tgz
+npm install --global https://github.com/ctxrs/figma-server/releases/download/v0.2.0/ctxrs-figma-server-0.2.0.tgz
 ```
 
 ## Log in and connect your agent
@@ -86,13 +86,25 @@ If the agent cannot find the command, give it the installed executable's
 absolute path. See [MCP launcher setup](docs/operations.md#mcp-launcher-setup)
 for PATH and Windows launcher details. The proxy does not start the daemon.
 
-Connect multiple agents to the same daemon. Each file lease has its own tab,
-so agents can work on different files in parallel. For the same file, one
-agent from this server holds the writer lease at a time. Another writer waits
-up to 30 seconds, then receives `file_busy` if the lease is still held. Human
-collaborators and other clients remain outside that lock. MCP stdio and the
-JSON HTTP API share these rules. See
-[agent tools](docs/agent-tools.md) for exact inputs and lease handling.
+The CLI handles setup, login, status, server startup and the MCP proxy. Agents
+with shell access can call tools through the [JSON HTTP API](docs/agent-tools.md#json-http-api).
+Both tool interfaces use the same running browser and signed-in account.
+
+## Multiple agents and tabs
+
+The server supports 32 client sessions and eight managed file tabs. Each file
+lease gets a tab, so agents can work on different files in parallel. A client
+session and its leases are separate from your persistent Figma login; closing
+a client does not erase the browser profile.
+
+For managed operations on the same file, one server agent holds the writer
+lease at a time. Another writer waits up to 30 seconds, then receives
+`file_busy` if the lease is still held. Human collaborators and other clients
+remain outside that coordination. Raw JavaScript and CDP are trusted browser
+authority and can bypass managed file coordination; browser scope can control
+all targets in the shared account's browser. Targets created through raw CDP
+are outside the eight managed-tab slots; their caller closes them, or browser
+shutdown ends them.
 
 ## Try it
 
@@ -116,22 +128,45 @@ For a first edit, use a disposable Design file with edit access:
 See [agent tools](docs/agent-tools.md#a-small-edit-with-readback) for field
 readback and text inputs, and the [image example](docs/agent-tools.md#supplying-an-image)
 for chooser uploads. Native text content and image insertion/save have separate
-qualification limits.
+qualification limits; see [recorded evidence](docs/TESTING.md).
+
+## JavaScript and full CDP
+
+Open a writer lease and keep its returned UUID. These are MCP tool arguments,
+not shell commands:
+
+```text
+figma.open({"file_url":"https://www.figma.com/design/FILEKEY/NAME","mode":"write"})
+  -> keep the returned lease
+figma.evaluate({"lease":"<returned UUID>","expression":"({title: document.title, url: location.href})","await_promise":true})
+figma.cdp({"lease":"<returned UUID>","command":"Runtime.evaluate","params":{"expression":"document.title","returnByValue":true}})
+figma.cdp({"lease":"<returned UUID>","scope":"browser","command":"Browser.getVersion"})
+figma.cdp_close({"lease":"<returned UUID>"})
+figma.cdp_close({"lease":"<returned UUID>","scope":"browser"})
+figma.release({"lease":"<returned UUID>"})
+```
+
+`figma.evaluate` runs JavaScript in the leased page. `figma.cdp` sends an
+arbitrary protocol command with its parameters and returns the raw response.
+Its default scope is the leased tab; `browser` scope reaches the shared
+account's browser. Responses are unredacted and size bounded. Inspect
+`result.exceptionDetails` when JavaScript throws. A serializable evaluation
+value is returned at `result.result.value`.
+
+Connections persist per lease and scope. Use `figma.cdp_events` to consume
+events and `figma.cdp_close` to detach a connection; detaching does not stop the
+shared browser. See [JavaScript, CDP and events](docs/agent-tools.md#javascript-cdp-and-events)
+for cursor handling and child-target routing.
 
 ## Know the limits
 
-- Design property edits were verified on Linux after normal reopening and a
-  browser restart; macOS verified reading those properties and reopening.
-  macOS editing, ordinary-user Windows setup, other editor types, native text
-  content, image insertion and component/style workflows remain unqualified.
-  See the [tested configurations and evidence](docs/TESTING.md).
-- The tools operate the visible web editor. Inspection and field readback are
-  bounded; there is no complete native Figma node API. The CDP tool exposes
-  viewport metrics only.
+- Page JavaScript and CDP provide browser access; they do not supply a complete
+  native Figma node API. `inspect` and `read_value` are bounded convenience tools.
 - A dispatched input can remain `unverified`. A failed or lost response can
   still leave a change in the file; inspect before repeating it.
-- Tabs share a clipboard. Clipboard shortcuts are blocked; menu or coordinate
-  copy/paste is unsupported during concurrent work. Use explicit text inputs;
+- Tabs share a clipboard. The keypress helper blocks clipboard shortcuts;
+  raw browser access can still affect shared clipboard state. Use explicit
+  text inputs;
   see [clipboard limits](docs/agent-tools.md#clipboard-and-concurrent-tabs).
 - PNG export captures the rendered viewport or an accessible element. Native
   node exports and faithful HTML-to-layer conversion are not implemented.

@@ -5,6 +5,7 @@ import { type Config, State, privateDirectory } from './state.js';
 import { LIMITS, fileUrl, figmaOrigin, permittedNavigation, sameFile, modifierKeys, type Modifier, type ImagePayload, type Expectation, type LocatorSpec } from './security.js';
 import { Fault, fault } from './errors.js';
 import { bounded } from './scheduler.js';
+import { CdpChannel, type CdpReply, type CdpScope } from './cdp.js';
 import { inspection, locate, pasteHtml, probe, readValue, requireEditing, verify, type Readiness, type Verification } from './figma-adapter.js';
 
 export interface BrowserTab {
@@ -27,6 +28,10 @@ export interface BrowserTab {
   paste(html: string, target?: LocatorSpec): Promise<void>;
   verify(expectation?: Expectation): Promise<Verification>;
   metrics(): Promise<Record<string, number>>;
+  checkRaw?(scope: CdpScope): Promise<void>;
+  cdp?(scope: CdpScope, command: string, params: Record<string, unknown>): Promise<CdpReply>;
+  cdpEvents?(scope: CdpScope, after: number, limit: number, waitMs: number, signal?: AbortSignal): Promise<Record<string, unknown>>;
+  closeCdp?(scope: CdpScope): Promise<void>;
 }
 export type AccountStatus = { account: string; state: Readiness | 'stopped' | 'starting' | 'authorizing'; generation?: string };
 export interface BrowserBackend {
@@ -54,7 +59,7 @@ export function browserEnvironment(state: State): Record<string, string> {
   return env;
 }
 
-type Worker = { context: BrowserContext; generation: string; stopping: boolean; status: AccountStatus; headed: boolean };
+type Worker = { context: BrowserContext; generation: string; stopping: boolean; status: AccountStatus; headed: boolean; trustedRaw?: boolean };
 type Opening = {
   worker: Worker; account: string; key: string; opener: Page; target?: Page;
   pages: Set<Page>; identified: Set<Page>; metadata: Map<Page, { key: string; name: string; epoch: number }>; epochs: Map<Page, number>; readers: Map<Page, Promise<void>>; cdp: Set<CDPSession>; actionTime?: Promise<number>; valid: boolean; deadline: number;
@@ -216,6 +221,8 @@ export class BrowserSupervisor implements BrowserBackend {
       await access(executablePath);
       const context = await this.launchBrowser(profile, {
         executablePath, channel: 'chromium', headless: !headed, chromiumSandbox: true,
+        // The CLI owns Ctrl+C and must await browser teardown and daemon unlock.
+        handleSIGINT: false,
         viewport: { width: 1920, height: 1200 }, acceptDownloads: false,
         serviceWorkers: 'block', timeout: LIMITS.operationMs,
         env: browserEnvironment(this.state),
@@ -231,6 +238,7 @@ export class BrowserSupervisor implements BrowserBackend {
       // Block unsafe redirects before network dispatch, including child-frame navigations.
       const extra = headed ? this.config.accounts.find(a => a.name === account)?.loginOrigins ?? [] : [];
       await context.route('**/*', async route => {
+        if (worker.trustedRaw) { await route.fallback(); return; }
         const request = route.request();
         if (request.isNavigationRequest()) {
           if (headed) {
@@ -261,16 +269,25 @@ export class BrowserSupervisor implements BrowserBackend {
       context.on('page', page => {
         if (!headed) {
           page.on('popup', popup => {
+            if (worker.trustedRaw && (!this.owned.has(page) || this.owned.get(page)?.phase === 'leased')) return;
             void this.claimPopup(worker, popup).then(allowed => {
-              if (!allowed) return popup.close();
+              if (!allowed && !worker.trustedRaw) return popup.close();
             }).catch(() => undefined);
           });
           page.on('framenavigated', frame => {
             const opening = this.owned.get(page);
             if (!opening) return;
+            if (worker.trustedRaw && opening.phase === 'leased') {
+              // Do not close a raw-controlled target. Its old UI identity cannot
+              // be resurrected by navigating back after a different document.
+              if (frame === page.mainFrame() && !sameFile(frame.url(), opening.key)) opening.valid = false;
+              return;
+            }
             if (frame === page.mainFrame()) {
               if (!this.navigationAllowed(opening, page, frame.url())) this.invalidate(opening);
             } else {
+              // Raw authority admits child frames during new managed openings too.
+              if (worker.trustedRaw) return;
               const rejected = this.blockedFrames.get(frame);
               this.blockedFrames.delete(frame);
               // Chromium commits an internal error document after an aborted iframe
@@ -289,7 +306,7 @@ export class BrowserSupervisor implements BrowserBackend {
         } else page.on('framenavigated', frame => {
           if (!permittedNavigation(frame.url(), extra)) void page.close().catch(() => undefined);
         });
-        page.on('download', download => { void download.cancel().catch(() => undefined); });
+        page.on('download', download => { if (!worker.trustedRaw) void download.cancel().catch(() => undefined); });
       });
       context.on('request', request => {
         try {
@@ -483,7 +500,8 @@ export class BrowserSupervisor implements BrowserBackend {
       }
     };
     const makeTab = (target: Page) => new PlaywrightTab(target, worker.context, fileKey, worker.generation,
-      () => this.live(opening) && opening.target === target && opening.identified.has(target), close);
+      () => this.live(opening) && opening.target === target && opening.identified.has(target), close,
+      { enable: () => { worker.trustedRaw = true; }, valid: () => !worker.stopping && this.workers.get(account) === worker });
     let tab = makeTab(page);
     try {
       const response = await page.goto(file.url, { waitUntil: 'domcontentloaded', timeout: Math.min(10_000, remaining()) });
@@ -626,7 +644,11 @@ export class BrowserSupervisor implements BrowserBackend {
   }
   async stopAccount(account: string): Promise<void> {
     const worker = this.workers.get(account);
-    if (worker) { worker.stopping = true; await worker.context.close(); }
+    if (worker) {
+      worker.stopping = true;
+      try { await worker.context.close(); }
+      catch (error) { if (worker.context.browser()?.isConnected()) throw error; }
+    }
   }
   async stop(): Promise<void> {
     await Promise.all([...this.workers.keys()].map(account => this.stopAccount(account)));
@@ -635,9 +657,14 @@ export class BrowserSupervisor implements BrowserBackend {
 
 export class PlaywrightTab implements BrowserTab {
   readonly target = randomUUID();
+  private readonly channels = new Map<CdpScope, Promise<CdpChannel>>();
+  private readonly attached = new Set<CdpChannel>();
+  private rawClosed = false;
+  private contextEnded?: Promise<void>;
+  private contextEnd?: () => void;
   constructor(private readonly page: Page, private readonly context: BrowserContext,
     private readonly fileKey: string, readonly generation: string, private readonly valid: () => boolean,
-    private readonly cleanup?: () => Promise<void>) {}
+    private readonly cleanup?: () => Promise<void>, private readonly rawAccess?: { enable: () => void; valid: () => boolean }) {}
   async check(write = false): Promise<void> {
     if (!this.valid() || this.page.isClosed()) fault('target_invalid', 'Target generation is no longer valid.', 409);
     const state = await editorReadiness(this.page, this.fileKey);
@@ -651,7 +678,56 @@ export class PlaywrightTab implements BrowserTab {
     }
     if (!this.valid() || this.page.isClosed()) fault('target_invalid', 'Target generation was lost during its readiness check.', 409);
   }
-  close(): Promise<void> { return this.cleanup ? this.cleanup() : this.page.isClosed() ? Promise.resolve() : this.page.close(); }
+  async close(): Promise<void> {
+    this.rawClosed = true;
+    // Close the owned page concurrently; a stuck attach/detach must not delay it.
+    const pageClose = this.cleanup ? this.cleanup() : this.page.isClosed() ? Promise.resolve() : this.page.close();
+    const detach = Promise.all([...this.channels.values()].map(async pending => {
+      try { await (await pending).close(); } catch { /* Attached resources are checked separately below. */ }
+    })).then(async () => { await Promise.all([...this.attached].map(channel => channel.close())); });
+    await Promise.all([pageClose, this.contextEnded ? Promise.race([detach, this.contextEnded]) : detach]);
+    if (this.contextEnd) this.context.off('close', this.contextEnd);
+  }
+  async checkRaw(scope: CdpScope): Promise<void> {
+    if (this.rawClosed || !(this.rawAccess?.valid() ?? this.valid()) || !this.context.browser()?.isConnected()
+        || scope === 'tab' && this.page.isClosed()) fault('target_invalid', 'The managed CDP handle generation is no longer live.', 409);
+  }
+  private channel(scope: CdpScope): Promise<CdpChannel> {
+    const existing = this.channels.get(scope);
+    if (existing) return existing;
+    const pending = (async () => {
+      await this.checkRaw(scope);
+      if (!this.contextEnded) this.contextEnded = new Promise(resolve => {
+        this.contextEnd = () => resolve(); this.context.once('close', this.contextEnd);
+      });
+      const browser = this.context.browser();
+      if (!browser) fault('cdp_unsupported', 'This context does not expose a Chromium browser connection.', 409);
+      const session = scope === 'browser' ? await browser.newBrowserCDPSession() : await this.context.newCDPSession(this.page);
+      const channel = new CdpChannel(session);
+      this.attached.add(channel);
+      if (this.rawClosed || !(this.rawAccess?.valid() ?? this.valid())) {
+        await channel.close(); fault('target_invalid', 'CDP attachment completed after its handle expired.', 409);
+      }
+      this.rawAccess?.enable();
+      return channel;
+    })();
+    this.channels.set(scope, pending);
+    void pending.catch(() => { if (!this.rawClosed && this.channels.get(scope) === pending) this.channels.delete(scope); });
+    return pending;
+  }
+  async cdp(scope: CdpScope, command: string, params: Record<string, unknown>): Promise<CdpReply> {
+    return (await this.channel(scope)).send(command, params);
+  }
+  async cdpEvents(scope: CdpScope, after: number, limit: number, waitMs: number, signal?: AbortSignal): Promise<Record<string, unknown>> {
+    return (await this.channel(scope)).events(after, limit, waitMs, signal);
+  }
+  async closeCdp(scope: CdpScope): Promise<void> {
+    const pending = this.channels.get(scope);
+    if (pending) {
+      const channel = await pending; await channel.close(); this.attached.delete(channel);
+      if (this.channels.get(scope) === pending) this.channels.delete(scope);
+    }
+  }
   inspect(): Promise<Record<string, unknown>> { return inspection(this.page); }
   readValue(locator: LocatorSpec): Promise<string> { return readValue(this.page, locator); }
   async reload(): Promise<void> {

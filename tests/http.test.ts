@@ -55,7 +55,7 @@ test('stable MCP 2025-06-18 initialization, tool schemas, images, artifacts and 
   assert.equal((await fetch(`${daemon.url}/api/${artifact.artifact}`)).status, 401);
   const other = env.core.sessions.createSession();
   assert.equal((await fetch(`${daemon.url}/api/${artifact.artifact}`, { headers: { Authorization: `Bearer ${token}`, 'X-Figma-Session': other } })).status, 404);
-  assert.equal((await rpc(5, 'tools/call', { name: 'figma.cdp', arguments: { ...lease, command: 'Runtime.evaluate', expression: 'document.cookie' } })).result.isError, true);
+  assert.equal((await rpc(5, 'tools/call', { name: 'figma.cdp', arguments: { ...lease, command: 'Runtime.evaluate', expression: '42' } })).result.isError, true);
   assert.equal((await fetch(`${daemon.url}/mcp`, { method: 'DELETE', headers })).status, 200);
   await tick(); assert.equal(env.core.sessions.leases.size, 0);
 });
