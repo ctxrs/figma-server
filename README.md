@@ -1,73 +1,64 @@
-# figma-server
-
 <img src="docs/assets/figma-server-banner.png" alt="Figma is hostile to your agents, so just run figma-server for full access over CDP" width="100%">
 
-Run a dedicated Figma browser for your agents.
+Figma wants to choose which agents can use your files through its MCP server. They would also like you to use [*their* agent](https://www.figma.com/ai/). This is clearly an untenable position for them. The inevitable conclusion is that people have their own agents. This could be a personal agent, a coding agent, an enterprise agent, or whatever. We're not going to have 1000 agents for 1000 different apps and services. We're going to have one agent and give it tools!
 
-`figma-server` connects MCP clients and JSON HTTP tooling to the Figma web editor
-through local Chromium. Sign in once in its dedicated browser profile and reuse
-that session across agents until Figma asks you to sign in again.
+Figma is a tool. And I will happily pay for it as I have for years. But I'm not going to use the Figma agent.
 
-Agents can inspect the editor, take screenshots, and send clicks, text,
-keyboard shortcuts and drags. JavaScript evaluation and full CDP give your
-trusted agents direct access to the page and browser, alongside those
-convenience tools.
+## Evidence of Hostility
 
-Connect through MCP stdio, or call the JSON HTTP API from your own tooling.
-Keep the same browser setup when you switch agent clients or model providers.
-There is no model-provider allowlist. The service runs independently of Figma's
-official MCP server.
+- **Figma's own policy:** “Only clients listed in the Figma MCP Catalog can connect to the Figma MCP Server.” Developers of other clients are directed to a waitlist. [Official documentation](https://developers.figma.com/docs/figma-mcp-server/)
 
-The dedicated browser profile lives on your machine. Figma still uses its
-cloud service, and tool results and screenshots go to your agent
-client and any model provider it uses. Choose the agent accordingly.
+- **HN discussion:** [“Figma restricts MCP access to whitelisted clients, excluding Pi”](https://news.ycombinator.com/item?id=49922729). A [firsthand comment](https://news.ycombinator.com/item?id=49923207) describes Copilot Desktop connection failures because Copilot CLI was approved but Desktop wasn't. The commenter says it eventually worked.
+
+- **X exchange with Dylan Field:** The discussion includes [Figma employee Gayani’s supported-client reply](https://x.com/GayaniFigma/status/2105295629941350454), [MCP co-creator @dsp_’s criticism](https://x.com/dsp_/status/2105316536852320279), and [Figma CEO Dylan Field’s response](https://x.com/zoink/status/2105369960008855914).
+
+- **GitHub rejection report:** [pi-mcp-adapter issue #49](https://github.com/nicobailon/pi-mcp-adapter/issues/49) includes an OAuth registration failure returning `403 Forbidden` and requests catalog approval. The [maintainer’s closing comment](https://github.com/nicobailon/pi-mcp-adapter/issues/49#issuecomment-5076558935) treats this as requiring external Figma approval.
+
+- **Custom-agent friction on Figma's forum:** [A backend developer reports authenticated requests producing no canvas changes](https://forum.figma.com/ask-the-community-7/can-figma-mcp-be-used-for-programmatic-design-generation-seems-like-read-only-only-57148). The accepted answer explains the supported-client workflow and demonstrates writes through Claude Code.
+
+- **Quota frustration on Reddit:** [“How to limit MCP tool calls?”](https://www.reddit.com/r/FigmaDesign/comments/1sbfwkl/how_to_limit_mcp_tool_calls/) describes exhausting the allowance during basic design experimentation. [Current official limits](https://developers.figma.com/docs/figma-mcp-server/rate-limits-access/) allow View/Collab seats six read calls per month on paid plans, or 20 on Starter. Some write tools are exempt.
+
+Figma supports multiple third-party clients, and approved workflows can write with a Full seat. [Current write documentation](https://developers.figma.com/docs/figma-mcp-server/write-to-canvas/). The approval gate is the objection here.
+
+## So what do we do?
+
+Well, Figma is just a web app. So let's open it in Chromium, sign in, and let our agents drive the browser through Chrome DevTools Protocol (CDP). Your agent can click, type, take screenshots, run arbitrary JavaScript and open multiple tabs to work on different files.
+
+We bundled that workflow as `figma-server`. Run it, sign in once, and connect your agent through MCP or the HTTP API. The browser runs headlessly once you're signed in. Your login stays in the dedicated profile until Figma asks you to sign in again.
+
+So let's get started!
 
 ## Install
 
-You need **Node.js 22.16.0 or newer**, npm, and a graphical desktop for sign-in.
-
-Install the v0.2.0 prerelease archive:
+You need **Node.js 22.16.0 or newer, npm, Git, and a graphical desktop for sign-in**.
 
 ```sh
-npm install --global https://github.com/ctxrs/figma-server/releases/download/v0.2.0/ctxrs-figma-server-0.2.0.tgz
+npm install -g github:ctxrs/figma-server
 ```
+
+This installs current main. The project is a prerelease; the [v0.2.0 release archive](https://github.com/ctxrs/figma-server/releases/tag/v0.2.0) is also available if you want a fixed version.
 
 ## Log in and connect your agent
 
-In terminal 1:
+First, initialize the dedicated profile and install Chromium:
 
 ```sh
 figma-server init
 figma-server browser-install
-figma-server run
 ```
 
-Keep `run` open. It owns the browser profile and listens on
-`http://127.0.0.1:4317`. Stop it with Ctrl+C when finished.
+**Using Google or enterprise SSO?** [Configure the exact provider origins](docs/operations.md#google-and-enterprise-sso) before logging in.
 
-Before Google or enterprise SSO login,
-[configure the exact provider origins](docs/operations.md#google-and-enterprise-sso)
-and restart the daemon.
-
-In terminal 2:
+Then, in the same terminal:
 
 ```sh
 figma-server login
-figma-server status
+figma-server run
 ```
 
-`browser-install` installs full Chromium. `login` opens it in a dedicated
-profile: sign in to Figma there, complete any prompts, then press Enter in
-terminal 2. A Figma API key cannot authenticate this web editor; no personal
-access token is needed. The profile reuses your session between runs until
-Figma requires sign-in again. The service checks it by reopening headlessly.
+Sign in in the browser window, then press Enter in the terminal. Keep `run` open while your agents work; Ctrl+C stops it. Login can happen before the daemon starts.
 
-You do not need to configure a probe file first. `authenticated_unverified`
-means a signed-in dashboard was observed; ask the agent to open a file to check
-editor access. The account can then report `ready`. If setup fails, run
-`figma-server doctor`; see [browser and login recovery](docs/operations.md).
-
-Add this server to your agent's MCP configuration:
+Add this to your agent's MCP configuration:
 
 ```json
 {
@@ -80,132 +71,52 @@ Add this server to your agent's MCP configuration:
 }
 ```
 
-The agent launches `figma-server mcp`. This stdio proxy reads the local secret
-file and connects to the running daemon. No environment variables or pasted
-tokens are needed. `figma-server mcp stdio` is also accepted.
+Keep the server running while your agent connects. The MCP launcher handles authentication automatically; you don't have to paste tokens. If your agent cannot find `figma-server`, use its absolute path; see [MCP launcher setup](docs/operations.md#mcp-launcher-setup).
 
-If the agent cannot find the command, give it the installed executable's
-absolute path. See [MCP launcher setup](docs/operations.md#mcp-launcher-setup)
-for PATH and Windows launcher details. The proxy does not start the daemon.
+Give your agent a plain Design file URL your account can access:
 
-The CLI handles setup, login, status, server startup and the MCP proxy. Agents
-with shell access can call tools through the [JSON HTTP API](docs/agent-tools.md#json-http-api).
-Both tool interfaces use the same running browser and signed-in account.
+> Open this Figma file, inspect the visible layers and controls, and take a screenshot. Release the file when you're done.
 
-## Multiple agents and tabs
+For a first edit, use a disposable file:
 
-The server supports 32 client sessions and eight managed file tabs. Each file
-lease gets a tab, so agents can work on different files in parallel. A client
-session and its leases are separate from your persistent Figma login; closing
-a client does not erase the browser profile.
+> Create a Frame in this test file, set it to 600 × 400, and read both values back. Take a screenshot and release the file. If you can't verify a step, tell me what you observed.
 
-For managed operations on the same file, one server agent holds the writer
-lease at a time. Another writer waits up to 30 seconds, then receives
-`file_busy` if the lease is still held. Human collaborators and other clients
-remain outside that coordination. Raw JavaScript and CDP are trusted browser
-authority and can bypass managed file coordination; browser scope can control
-all targets in the shared account's browser. Targets created through raw CDP
-are outside the eight managed-tab slots; their caller closes them, or browser
-shutdown ends them.
+Building your own agent? Use the [JSON HTTP API](docs/agent-tools.md#json-http-api). The [agent tools guide](docs/agent-tools.md) has the arguments and examples.
 
-## Try it
+## FAQ
 
-Give your agent a Design file URL your signed-in account can access. Use a plain
-file URL for dashboard opening; if a selection link is unsupported, remove
-`node-id` and `page-id` before trying again.
+### Can I use Figma at the same time as my agent?
 
-> Open this Figma file in read mode, inspect the visible layers and controls,
-> take a screenshot, and release the file. Tell me if editor access could not
-> be verified.
+Yes. Keep using Figma in your normal browser while your agent uses the dedicated browser. Figma's collaboration handles the shared file, but don't edit the same elements simultaneously.
 
-For a first edit, use a disposable Design file with edit access:
+### Do I have to sign in every time?
 
-> Create a Frame in this test file. Set Width to 600 and Height to 400,
-> pressing Enter after each field, then read both values back. Take a
-> screenshot, release the file and open the same URL again. Reselect the Frame
-> and read both fields again. Report any observed save state separately;
-> leave it unknown if no indicator is identifiable. Release the file when done.
-> If a step cannot be verified, stop and show me what you observed.
+No. The dedicated profile keeps your login between runs until Figma asks you to sign in again. Logging in again invalidates that account's active agent leases, so finish their work first.
 
-See [agent tools](docs/agent-tools.md#a-small-edit-with-readback) for field
-readback and text inputs, and the [image example](docs/agent-tools.md#supplying-an-image)
-for chooser uploads. Native text content and image insertion/save have separate
-qualification limits; see [recorded evidence](docs/TESTING.md).
+### Do I need a Figma API key?
 
-## JavaScript and full CDP
+No. You sign in to the web app with your normal Figma account. Your account still needs permission to view or edit the file.
 
-Open a writer lease and keep its returned UUID. These are MCP tool arguments,
-not shell commands:
+### Do I need Chrome installed?
 
-```text
-figma.open({"file_url":"https://www.figma.com/design/FILEKEY/NAME","mode":"write"})
-  -> keep the returned lease
-figma.evaluate({"lease":"<returned UUID>","expression":"({title: document.title, url: location.href})","await_promise":true})
-figma.cdp({"lease":"<returned UUID>","command":"Runtime.evaluate","params":{"expression":"document.title","returnByValue":true}})
-figma.cdp({"lease":"<returned UUID>","scope":"browser","command":"Browser.getVersion"})
-figma.cdp_close({"lease":"<returned UUID>"})
-figma.cdp_close({"lease":"<returned UUID>","scope":"browser"})
-figma.release({"lease":"<returned UUID>"})
-```
+`figma-server browser-install` installs full Chromium. You can instead select an existing Chrome or Chromium executable with `figma-server init --browser /absolute/path/to/chromium`; see [browser setup](docs/operations.md#browser-setup).
 
-`figma.evaluate` runs JavaScript in the leased page. `figma.cdp` sends an
-arbitrary protocol command with its parameters and returns the raw response.
-Its default scope is the leased tab; `browser` scope reaches the shared
-account's browser. Responses are unredacted and size bounded. Inspect
-`result.exceptionDetails` when JavaScript throws. A serializable evaluation
-value is returned at `result.result.value`.
+### Which agents can use this?
 
-Connections persist per lease and scope. Use `figma.cdp_events` to consume
-events and `figma.cdp_close` to detach a connection; detaching does not stop the
-shared browser. See [JavaScript, CDP and events](docs/agent-tools.md#javascript-cdp-and-events)
-for cursor handling and child-target routing.
+Any agent that can connect to an MCP stdio server or call the JSON HTTP API. Use the agent and model provider you already have. Give access only to agents you trust: they have browser authority, and results go to the agent and any model provider it uses.
 
-## Know the limits
+### Can several agents work at once?
 
-- Page JavaScript and CDP provide browser access; they do not supply a complete
-  native Figma node API. `inspect` and `read_value` are bounded convenience tools.
-- A dispatched input can remain `unverified`. A failed or lost response can
-  still leave a change in the file; inspect before repeating it.
-- Tabs share a clipboard. The keypress helper blocks clipboard shortcuts;
-  raw browser access can still affect shared clipboard state. Use explicit
-  text inputs;
-  see [clipboard limits](docs/agent-tools.md#clipboard-and-concurrent-tabs).
-- PNG export captures the rendered viewport or an accessible element. Native
-  node exports and faithful HTML-to-layer conversion are not implemented.
-- Figma UI changes can break selectors and readiness checks. Accepted Design,
-  FigJam, Slides, or prototype URLs do not establish that each editor works.
+Yes: up to 32 client sessions and eight managed tabs. Managed operations allow one writer per file at a time. Raw JavaScript and CDP can bypass those locks and affect other agents' tabs; see [network access and shared browser authority](docs/operations.md#network-access).
 
-Keep your normal browser profile separate. Finish agent work before signing in
-again: login invalidates that account's active leases. See
-[Operations](docs/operations.md) for browser setup, state, and recovery.
+### Can my agent run arbitrary JavaScript and CDP commands?
 
-## Development
+Yes. `figma.evaluate` runs arbitrary page JavaScript; `figma.cdp` sends arbitrary protocol commands, with persistent connections and event polling. These tools do not supply a native Figma node API. See [JavaScript, CDP and events](docs/agent-tools.md#javascript-cdp-and-events).
 
-From a source checkout:
+### Can I run it on another machine?
 
-```sh
-npm ci
-npm run build
-node dist/src/cli.js init
-node dist/src/cli.js browser-install
-node dist/src/cli.js run
-```
+Yes, with Chromium's dependencies and a graphical display you can reach for login. After login, the daemon uses a headless browser. Use an [SSH tunnel](docs/operations.md#network-access) for remote access and keep the daemon on loopback. The tunnel itself does not provide the login display.
 
-Use `node dist/src/cli.js` in place of `figma-server` for the remaining commands.
-For an agent client, use `command: "node"` with the absolute path to
-`dist/src/cli.js` followed by `mcp` in `args`.
+### What if something breaks?
 
-```sh
-npm test
-npm run format:check
-```
-
-`format:check` runs the TypeScript compiler without emitting files. Browser
-fixtures and source tests do not establish live Figma editing; the
-[qualification guide](docs/TESTING.md) describes the separate checks.
-
-| Documentation | What it covers |
-| --- | --- |
-| [Operations](docs/operations.md) | Browser setup, login, MCP launchers, local state, and recovery. |
-| [Agent tools](docs/agent-tools.md) | MCP and HTTP API, tool inputs, leases, and verification. |
-| [Release qualification](docs/TESTING.md) | Package, browser, platform, and live-Figma evidence. |
+Run `figma-server doctor` and check [Operations](docs/operations.md). Figma UI changes can break browser automation. An input being dispatched does not prove an edit was saved; the [tool guide](docs/agent-tools.md) and [qualification guide](docs/TESTING.md) explain the limits and what has actually been tested.

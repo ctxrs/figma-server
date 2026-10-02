@@ -2,8 +2,9 @@
 
 ## Browser setup
 
-Install the archive as described in the [README](../README.md#install), using
-Node.js 22.16.0 or newer and npm. Then initialize and install Chromium:
+Install from GitHub as described in the [README](../README.md#install), using
+Node.js 22.16.0 or newer, npm, and Git. This installs the current `main` branch.
+Then initialize and install Chromium:
 
 ```sh
 figma-server init
@@ -289,7 +290,7 @@ a raw Chromium debugging endpoint.
 | Chromium executable is missing | Run `figma-server browser-install`, or stop the daemon and select an installed browser with `init --browser`. |
 | Browser fails before displaying Figma | Check system libraries, the display for headed login, and the configured executable. |
 | Chromium reports no usable sandbox | Keep the sandbox enabled. Stop the daemon, then try `figma-server init --browser /usr/bin/google-chrome` if system Chrome is installed on Linux. Check host policy and dependencies. |
-| The install URL returns 404 | Check the release tag and archive filename in the URL. Install a downloaded release archive if needed. |
+| A release archive URL returns 404 | Check the release tag and archive filename in the URL. Install a downloaded release archive if needed. |
 | Global npm install fails on permissions | Use a Node/npm installation or global prefix writable by your OS account. Run setup, the daemon, and the MCP client as the same account. |
 | The agent cannot find the MCP command | Check its PATH or use an absolute launcher path; see [MCP launcher setup](#mcp-launcher-setup). |
 | `status` reports a stopped daemon | Keep `figma-server run` open in another terminal. The MCP proxy does not start it. |
