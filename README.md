@@ -1,5 +1,7 @@
 # figma-server
 
+<img src="docs/assets/figma-server-banner.png" alt="Figma is hostile to your agents, so just run figma-server for full access over CDP" width="100%">
+
 Run a dedicated Figma browser for your agents.
 
 `figma-server` connects MCP clients and JSON HTTP tooling to the Figma web editor
