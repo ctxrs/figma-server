@@ -30,13 +30,13 @@ So let's get started!
 
 ## Install
 
-You need **Node.js 22.16.0 or newer, npm, Git, and a graphical desktop for sign-in**.
+You need **Node.js 22.16.0 or newer, npm, and a graphical desktop for sign-in**.
 
 ```sh
-npm install -g github:ctxrs/figma-server
+npm i -g https://github.com/ctxrs/figma-server/releases/download/v0.2.0/ctxrs-figma-server-0.2.0.tgz
 ```
 
-This installs current main. The project is a prerelease; the [v0.2.0 release archive](https://github.com/ctxrs/figma-server/releases/tag/v0.2.0) is also available if you want a fixed version.
+This installs the released [v0.2.0 prerelease](https://github.com/ctxrs/figma-server/releases/tag/v0.2.0).
 
 ## Log in and connect your agent
 

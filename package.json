@@ -20,7 +20,6 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "prepare": "npm --global=false --prefix . install --ignore-scripts --include=dev && npm --global=false --prefix . run build",
     "test": "npm run build && node --test dist/tests/*.test.js",
     "check": "npm test",
     "start": "node dist/src/cli.js run",
