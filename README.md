@@ -120,3 +120,7 @@ Yes, with Chromium's dependencies and a graphical display you can reach for logi
 ### What if something breaks?
 
 Run `figma-server doctor` and check [Operations](docs/operations.md). Figma UI changes can break browser automation. An input being dispatched does not prove an edit was saved; the [tool guide](docs/agent-tools.md) and [qualification guide](docs/TESTING.md) explain the limits and what has actually been tested.
+
+### Check out ctx, our context engineering toolchain
+
+While you're here, check out https://github.com/ctxrs/ctx which is our toolchain for context engineering. It lets you search your agent history locally, blame any code to whichever agent session wrote it, symbol/knowledge graph (like graphify) but 1,000x faster, and more.
