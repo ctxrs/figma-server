@@ -1,0 +1,12 @@
+{
+  "name": "ctxrs-figma-server",
+  "owner": {
+    "name": "ctxrs"
+  },
+  "plugins": [
+    {
+      "name": "figma-server",
+      "source": "./"
+    }
+  ]
+}
