@@ -1,18 +1,19 @@
 # figma-server
 
-Give your agent a dedicated Figma browser.
+Run a dedicated Figma browser for your agents.
 
-`figma-server` connects an MCP agent to the Figma web editor through a local
-Chromium session. The agent can inspect the visible editor, take screenshots,
-and send clicks, text, keyboard shortcuts, and drags. It can hold modifiers for
-a gesture and supply PNG/JPEG bytes to an editor file chooser. Sign in through
-the browser; its dedicated profile reuses the session between runs until Figma
-requires sign-in again.
+`figma-server` connects MCP clients and JSON HTTP tooling to the Figma web editor
+through local Chromium. Sign in once in its dedicated browser profile and reuse
+that session across agents until Figma asks you to sign in again.
+
+An agent can inspect the visible editor, take screenshots, and send clicks,
+text, keyboard shortcuts, and drags. It can hold modifiers for a gesture and
+supply PNG/JPEG bytes to an editor file chooser.
 
 Connect through MCP stdio, or call the JSON HTTP API from your own tooling.
 Keep the same browser setup when you switch agent clients or model providers.
-The service runs independently of Figma's official MCP server and does not
-require a Figma personal access token.
+There is no model-provider allowlist. The service runs independently of Figma's
+official MCP server.
 
 The browser profile and local service credential stay on your machine. Figma
 still uses its cloud service, and tool results and screenshots go to your agent
@@ -21,27 +22,13 @@ client and any model provider it uses. Choose the agent accordingly.
 ## Install
 
 You need **Node.js 22.16.0 or newer**, npm, and a graphical desktop for sign-in.
-Chromium is installed in the next step.
 
-**v0.1.0 release candidate:** the repository is public, but the GitHub release
-is still an unpublished draft. The URL below is the planned release asset;
-the install command is unavailable until publication. No npm registry package
-has been published.
-
-Native upload and modifier fixtures have passed on Linux, macOS ARM64, and
-Windows in the recorded configurations. Windows passes used an elevated token;
-ordinary-user setup remains unproven. Linux password sign-in persisted across
-a headless reopen of the default profile, but public file opening returned
-HTTP 403 before any native edits. Authenticated editing and saving remain
-unverified. See the
-[tested Node/browser configurations and validation boundaries](docs/TESTING.md).
+v0.1.0 is a prerelease. See the [tested configurations](docs/TESTING.md) for
+native workflow coverage.
 
 ```sh
 npm install --global https://github.com/ctxrs/figma-server/releases/download/v0.1.0/ctxrs-figma-server-0.1.0.tgz
 ```
-
-Before publication, use a supplied candidate archive in place of that URL, or
-[build from source](#development).
 
 ## Log in and connect your agent
 
@@ -56,7 +43,9 @@ figma-server run
 Keep `run` open. It owns the browser profile and listens on
 `http://127.0.0.1:4317`. Stop it with Ctrl+C when finished.
 
-Before Google or enterprise SSO login, [configure the exact provider origins](docs/operations.md#google-and-enterprise-sso) and restart the daemon.
+Before Google or enterprise SSO login,
+[configure the exact provider origins](docs/operations.md#google-and-enterprise-sso)
+and restart the daemon.
 
 In terminal 2:
 
@@ -65,10 +54,11 @@ figma-server login
 figma-server status
 ```
 
-`login` opens a dedicated browser window. Sign in to Figma there, complete any
-required prompts, then press Enter in terminal 2. Credentials belong in the
-browser. The service then checks that the session survives reopening the
-profile headlessly.
+`browser-install` installs full Chromium. `login` opens it in a dedicated
+profile: sign in to Figma there, complete any prompts, then press Enter in
+terminal 2. A Figma API key cannot authenticate this web editor; no personal
+access token is needed. The profile reuses your session between runs until
+Figma requires sign-in again. The service checks it by reopening headlessly.
 
 You do not need to configure a probe file first. `authenticated_unverified`
 means a signed-in dashboard was observed; ask the agent to open a file to check
@@ -96,37 +86,45 @@ If the agent cannot find the command, give it the installed executable's
 absolute path. See [MCP launcher setup](docs/operations.md#mcp-launcher-setup)
 for PATH and Windows launcher details. The proxy does not start the daemon.
 
+Connect multiple agents to the same daemon. Each file lease has its own tab,
+so agents can work on different files in parallel. For the same file, one
+agent from this server holds the writer lease at a time. Another writer waits
+up to 30 seconds, then receives `file_busy` if the lease is still held. Human
+collaborators and other clients remain outside that lock. MCP stdio and the
+JSON HTTP API share these rules. See
+[agent tools](docs/agent-tools.md) for exact inputs and lease handling.
+
 ## Try it
 
-Give your agent a file URL your signed-in account can access:
+Give your agent a Design file URL your signed-in account can access. Use a plain
+file URL for dashboard opening; if a selection link is unsupported, remove
+`node-id` and `page-id` before trying again.
 
 > Open this Figma file in read mode, inspect the visible layers and controls,
 > take a screenshot, and release the file. Tell me if editor access could not
 > be verified.
 
-For a first edit, use a disposable design file with edit access:
+For a first edit, use a disposable Design file with edit access:
 
-> In this test file, change the selected text to "Hello from my agent".
-> Inspect the result and take a screenshot. Check the save indicator, then
-> reload the file and check the text again. Release the file when done. If
-> anything is unverified, stop and show me what you observed.
+> Create a Frame in this test file. Set Width to 600 and Height to 400,
+> pressing Enter after each field, then read both values back. Take a
+> screenshot, release the file and open the same URL again. Reselect the Frame
+> and read both fields again. Report any observed save state separately;
+> leave it unknown if no indicator is identifiable. Release the file when done.
+> If a step cannot be verified, stop and show me what you observed.
 
-To try an image, supply a PNG or JPEG to your agent:
-
-> Open this disposable file and find its image file chooser. Upload the supplied
-> image bytes, inspect the result, and take a screenshot. Check saving and
-> reopen the file before reporting success; tell me what remains unverified.
-
-The upload tool delivers bytes to the chooser; insertion into the Figma document
-and saving need separate checks. See the
-[image and gesture examples](docs/agent-tools.md#supplying-an-image).
-
-The agent keeps a short-lived lease while working in its tab. A writer lease
-serializes this server's edits to the same file, and the agent releases it when
-finished. [Agent tools](docs/agent-tools.md) has exact inputs and example flows.
+See [agent tools](docs/agent-tools.md#a-small-edit-with-readback) for field
+readback and text inputs, and the [image example](docs/agent-tools.md#supplying-an-image)
+for chooser uploads. Native text content and image insertion/save have separate
+qualification limits.
 
 ## Know the limits
 
+- Design property edits were verified on Linux after normal reopening and a
+  browser restart; macOS verified reading those properties and reopening.
+  macOS editing, ordinary-user Windows setup, other editor types, native text
+  content, image insertion and component/style workflows remain unqualified.
+  See the [tested configurations and evidence](docs/TESTING.md).
 - The tools operate the visible web editor. Inspection and field readback are
   bounded; there is no complete native Figma node API. The CDP tool exposes
   viewport metrics only.

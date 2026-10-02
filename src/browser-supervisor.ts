@@ -1,10 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { access } from 'node:fs/promises';
-import { chromium, type BrowserContext, type Page, type FileChooser } from 'playwright';
+import { chromium, type BrowserContext, type Page, type FileChooser, type ElementHandle, type Request, type Response, type CDPSession, type Frame } from 'playwright';
 import { type Config, State, privateDirectory } from './state.js';
-import { LIMITS, permittedNavigation, sameFile, modifierKeys, type Modifier, type ImagePayload, type Expectation, type LocatorSpec } from './security.js';
+import { LIMITS, fileUrl, figmaOrigin, permittedNavigation, sameFile, modifierKeys, type Modifier, type ImagePayload, type Expectation, type LocatorSpec } from './security.js';
 import { Fault, fault } from './errors.js';
-import { inspection, locate, pasteHtml, probe, readValue, requireEditor, requireEditing, verify, type Readiness, type Verification } from './figma-adapter.js';
+import { bounded } from './scheduler.js';
+import { inspection, locate, pasteHtml, probe, readValue, requireEditing, verify, type Readiness, type Verification } from './figma-adapter.js';
 
 export interface BrowserTab {
   readonly target: string;
@@ -54,8 +55,99 @@ export function browserEnvironment(state: State): Record<string, string> {
 }
 
 type Worker = { context: BrowserContext; generation: string; stopping: boolean; status: AccountStatus; headed: boolean };
+type Opening = {
+  worker: Worker; account: string; key: string; opener: Page; target?: Page;
+  pages: Set<Page>; identified: Set<Page>; metadata: Map<Page, { key: string; name: string; epoch: number }>; epochs: Map<Page, number>; readers: Map<Page, Promise<void>>; cdp: Set<CDPSession>; actionTime?: Promise<number>; valid: boolean; deadline: number;
+  phase: 'direct' | 'dashboard' | 'action' | 'leased' | 'closing';
+};
+const dashboardUrl = 'https://www.figma.com/files/recents';
+function dashboardNavigation(input: string): boolean {
+  try {
+    const url = new URL(input);
+    return permittedNavigation(input) && /^\/(?:files|drafts)(?:\/|$)/.test(url.pathname);
+  } catch { return false; }
+}
+
+// Fixed, read-only card metadata paths. No React stores, callbacks or account data.
+function nativeCardMatches(node: Node, key: string): boolean {
+  if (!(node instanceof HTMLButtonElement) || node.disabled || node.getAttribute('aria-disabled') === 'true'
+      || !node.isConnected || !node.closest('[role="listitem"]')) return false;
+  const box = node.getBoundingClientRect();
+  if (box.width < 80 || box.height < 45 || box.width > 650 || box.height > 600
+      || box.x < 0 || box.y < 0 || box.right > innerWidth || box.bottom > innerHeight) return false;
+  for (let parent: Element | null = node; parent; parent = parent.parentElement) {
+    const style = getComputedStyle(parent);
+    if (style.display === 'none' || style.visibility !== 'visible' || Number(style.opacity) <= 0) return false;
+  }
+  const hit = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
+  if (!hit || !node.contains(hit)) return false;
+  const own = (value: unknown, field: string): unknown => value && typeof value === 'object'
+    ? Object.getOwnPropertyDescriptor(value, field)?.value : undefined;
+  const matches = (props: unknown): boolean => {
+    const paths = [['item', 'file', 'key'], ['tile', 'file', 'key'], ['bottomRightContent', 'props', 'tile', 'file', 'key']];
+    return paths.some(path => path.reduce<unknown>((value, field) => own(value, field), props) === key);
+  };
+  for (const field of Object.getOwnPropertyNames(node)) {
+    if (!field.startsWith('__reactFiber$')) continue;
+    let fiber = own(node, field);
+    for (let depth = 0; fiber && depth < 16; depth++, fiber = own(fiber, 'return')) {
+      if (matches(own(fiber, 'memoizedProps'))) return true;
+    }
+  }
+  return false;
+}
+function renderedNativeButton(node: Node): boolean {
+  if (!(node instanceof HTMLButtonElement) || !node.isConnected || node.disabled || node.getAttribute('aria-disabled') === 'true') return false;
+  const box = node.getBoundingClientRect();
+  if (box.width <= 0 || box.height <= 0 || box.x < 0 || box.y < 0 || box.right > innerWidth || box.bottom > innerHeight) return false;
+  for (let parent: Element | null = node; parent; parent = parent.parentElement) {
+    const style = getComputedStyle(parent);
+    if (style.display === 'none' || style.visibility !== 'visible' || Number(style.opacity) <= 0) return false;
+  }
+  return true;
+}
+async function nativeButton(page: Page, id: 'Text-tool' | 'Frame-tool' | 'filename'): Promise<ElementHandle<Node> | undefined> {
+  const buttons = await page.getByTestId(id).elementHandles();
+  const rendered: ElementHandle<Node>[] = [];
+  for (const button of buttons) {
+    if (await button.evaluate(renderedNativeButton)) rendered.push(button);
+    else await button.dispose();
+  }
+  if (rendered.length === 1) return rendered[0];
+  await Promise.all(rendered.map(button => button.dispose()));
+  return undefined;
+}
+async function filenameMatches(page: Page, name: string): Promise<boolean> {
+  const button = await nativeButton(page, 'filename');
+  if (!button) return false;
+  try { return await button.evaluate((node, expected) => (node as HTMLElement).innerText.trim() === expected, name); }
+  finally { await button.dispose(); }
+}
+async function nativeEditorReady(page: Page): Promise<boolean> {
+  const canvas = await page.locator('canvas').evaluateAll(nodes => nodes.some(node => {
+    const box = node.getBoundingClientRect();
+    if (box.width <= 0 || box.height <= 0) return false;
+    for (let parent: Element | null = node; parent; parent = parent.parentElement) {
+      const style = getComputedStyle(parent);
+      if (style.display === 'none' || style.visibility !== 'visible' || Number(style.opacity) <= 0) return false;
+    }
+    return true;
+  }));
+  if (!canvas) return false;
+  const text = await nativeButton(page, 'Text-tool'), frame = await nativeButton(page, 'Frame-tool');
+  const ready = Boolean(text && frame);
+  await text?.dispose(); await frame?.dispose();
+  return ready;
+}
+async function editorReadiness(page: Page, key: string): Promise<Readiness> {
+  const state = await probe(page, key);
+  return state === 'ui_unsupported' && sameFile(page.url(), key) && await nativeEditorReady(page) ? 'ready' : state;
+}
 export class BrowserSupervisor implements BrowserBackend {
   readonly workers = new Map<string, Worker>();
+  private readonly owned = new Map<Page, Opening>();
+  private readonly blockedFrames = new WeakMap<Frame, { opening: Opening; epoch: number }>();
+  private readonly started = new WeakMap<Request, { opening: Opening; page: Page; epoch: number; at: number }>();
   readonly states = new Map<string, AccountStatus>();
   private readonly starting = new Map<string, Promise<Worker>>();
   onCrash?: (account: string) => void;
@@ -140,17 +232,84 @@ export class BrowserSupervisor implements BrowserBackend {
       const extra = headed ? this.config.accounts.find(a => a.name === account)?.loginOrigins ?? [] : [];
       await context.route('**/*', async route => {
         const request = route.request();
-        if (request.isNavigationRequest() && (!permittedNavigation(request.url(), extra) || (!headed && await request.frame().page().opener()))) await route.abort('blockedbyclient');
-        else await route.fallback();
+        if (request.isNavigationRequest()) {
+          if (headed) {
+            if (!permittedNavigation(request.url(), extra)) await route.abort('blockedbyclient');
+            else await route.fallback();
+            return;
+          }
+          let page: Page;
+          try { page = request.frame().page(); }
+          catch { await route.abort('blockedbyclient'); return; } // Uncorrelatable early popup navigation.
+          let allowed = permittedNavigation(request.url(), extra);
+          if (!headed) {
+            if (await page.opener()) allowed = allowed && await this.claimPopup(worker, page);
+            const opening = this.owned.get(page);
+            if (opening && request.frame() === page.mainFrame()) allowed = allowed && this.navigationAllowed(opening, page, request.url());
+          }
+          if (!allowed) {
+            const opening = this.owned.get(page);
+            if (opening) {
+              if (request.frame() === page.mainFrame()) this.invalidate(opening);
+              else this.blockedFrames.set(request.frame(), { opening, epoch: opening.epochs.get(page) ?? 0 });
+            }
+            await route.abort('blockedbyclient'); return;
+          }
+        }
+        await route.fallback();
       });
       context.on('page', page => {
-        if (!headed) page.on('popup', popup => { void popup.close().catch(() => undefined); });
-        else page.on('framenavigated', frame => {
+        if (!headed) {
+          page.on('popup', popup => {
+            void this.claimPopup(worker, popup).then(allowed => {
+              if (!allowed) return popup.close();
+            }).catch(() => undefined);
+          });
+          page.on('framenavigated', frame => {
+            const opening = this.owned.get(page);
+            if (!opening) return;
+            if (frame === page.mainFrame()) {
+              if (!this.navigationAllowed(opening, page, frame.url())) this.invalidate(opening);
+            } else {
+              const rejected = this.blockedFrames.get(frame);
+              this.blockedFrames.delete(frame);
+              // Chromium commits an internal error document after an aborted iframe
+              // request. Only that same frame and opening epoch may retain the page.
+              if (frame.url() === 'chrome-error://chromewebdata/' && rejected?.opening === opening
+                  && rejected.epoch === opening.epochs.get(page)) return;
+              if (!permittedNavigation(frame.url()) && frame.url() !== 'about:blank') this.invalidate(opening);
+            }
+          });
+          page.on('crash', () => { const opening = this.owned.get(page); if (opening) this.invalidate(opening); });
+          page.on('close', () => {
+            const opening = this.owned.get(page);
+            if (opening && opening.phase !== 'closing' && (page === opening.target || page === opening.opener && !opening.target)) opening.valid = false;
+            this.owned.delete(page);
+          });
+        } else page.on('framenavigated', frame => {
           if (!permittedNavigation(frame.url(), extra)) void page.close().catch(() => undefined);
         });
         page.on('download', download => { void download.cancel().catch(() => undefined); });
       });
+      context.on('request', request => {
+        try {
+          const frame = request.frame(), page = frame.page();
+          const opening = this.owned.get(page);
+          if (!opening || frame !== page.mainFrame()) return;
+          if (request.isNavigationRequest()) {
+            opening.identified.delete(page);
+            opening.metadata.delete(page);
+            opening.epochs.set(page, (opening.epochs.get(page) ?? 0) + 1);
+          }
+          if (this.live(opening) && (request.isNavigationRequest() || opening.phase === 'action')) {
+            this.started.set(request, { opening, page, epoch: opening.epochs.get(page) ?? 0, at: request.timing().startTime });
+          }
+        } catch { /* Early popup requests have no attributable frame and are denied by the route. */ }
+      });
+      context.on('response', response => { void this.observeResponse(response); });
       context.on('close', () => {
+        for (const opening of this.owned.values()) if (opening.worker === worker) opening.valid = false;
+        for (const [page, opening] of this.owned) if (opening.worker === worker) this.owned.delete(page);
         this.workers.delete(account);
         this.set(worker, worker.stopping ? 'stopped' : 'crashed');
         if (!worker.stopping) this.onCrash?.(account);
@@ -164,44 +323,275 @@ export class BrowserSupervisor implements BrowserBackend {
       fault('browser_start_failed', 'Chromium could not start. Run doctor; keep the sandbox enabled.', 503);
     }
   }
-  async open(account: string, url: string, fileKey: string): Promise<BrowserTab> {
+  private documentLoads(opening: Opening, page: Page): Promise<void> {
+    const existing = opening.readers.get(page);
+    if (existing) return existing;
+    const pending = (async () => {
+      const cdp = await opening.worker.context.newCDPSession(page);
+      if (!this.live(opening) || this.owned.get(page) !== opening) { void cdp.detach().catch(() => undefined); return; }
+      opening.cdp.add(cdp);
+      const { frameTree } = await cdp.send('Page.getFrameTree');
+      if (!this.live(opening) || this.owned.get(page) !== opening) { void cdp.detach().catch(() => undefined); return; }
+      const frameId = frameTree.frame.id;
+      type Load = { at: number; epoch: number; loader: string; ok: boolean; cached: boolean };
+      const loads = new Map<string, Load>();
+      let overflow = false;
+      cdp.on('Network.requestWillBeSent', event => {
+        try {
+          if (event.redirectResponse) { loads.delete(event.requestId); return; }
+          const url = new URL(event.request.url);
+          if (event.frameId !== frameId || event.request.method !== 'GET' || url.origin !== figmaOrigin
+              || url.pathname !== `/api/file_metadata/${opening.key}` || url.search
+              || opening.phase !== 'action' || !this.live(opening)) return;
+          if (loads.size >= 4) { overflow = true; return; }
+          loads.set(event.requestId, { at: event.wallTime * 1000, epoch: opening.epochs.get(page) ?? 0,
+            loader: event.loaderId, ok: false, cached: false });
+        } catch { /* Unqualified requests are never read. */ }
+      });
+      cdp.on('Network.requestServedFromCache', event => { const load = loads.get(event.requestId); if (load) load.cached = true; });
+      cdp.on('Network.responseReceived', event => {
+        const load = loads.get(event.requestId);
+        if (!load) return;
+        try {
+          const url = new URL(event.response.url);
+          load.ok = url.origin === figmaOrigin && url.pathname === `/api/file_metadata/${opening.key}` && !url.search
+            && event.frameId === frameId && event.response.status === 200
+            && event.response.mimeType === 'application/json' && !event.response.fromDiskCache && !event.response.fromServiceWorker;
+        } catch { load.ok = false; }
+      });
+      cdp.on('Network.loadingFailed', event => { loads.delete(event.requestId); });
+      cdp.on('Network.loadingFinished', event => {
+        const load = loads.get(event.requestId);
+        if (!load) return;
+        void (async () => {
+          const current = () => !overflow && load.ok && !load.cached && this.live(opening)
+            && this.owned.get(page) === opening && opening.phase === 'action'
+            && opening.epochs.get(page) === load.epoch && sameFile(page.url(), opening.key)
+            && (!opening.target || opening.target === page);
+          if (!current() || !opening.actionTime || event.encodedDataLength > 65536) return;
+          const actionAt = await opening.actionTime;
+          if (!Number.isFinite(actionAt) || !Number.isFinite(load.at) || load.at < actionAt || !current()) return;
+          const tree = await cdp.send('Page.getFrameTree');
+          if (tree.frameTree.frame.id !== frameId || tree.frameTree.frame.loaderId !== load.loader || !current()) return;
+          const result = await cdp.send('Network.getResponseBody', { requestId: event.requestId });
+          const bytes = Buffer.from(result.body, result.base64Encoded ? 'base64' : 'utf8');
+          if (bytes.length > 65536 || !current()) return;
+          const payload = JSON.parse(bytes.toString('utf8')) as { meta?: { file_key?: unknown; name?: unknown } };
+          if (payload?.meta?.file_key !== opening.key || typeof payload.meta.name !== 'string'
+              || !payload.meta.name || payload.meta.name.length > 1024) return;
+          // Metadata normally arrives before the editor renders. Retain only typed
+          // identity fields for this document epoch, never the response body.
+          if (current()) opening.metadata.set(page, { key: opening.key, name: payload.meta.name, epoch: load.epoch });
+        })().catch(() => undefined).finally(() => loads.delete(event.requestId));
+      });
+      // Other responses share this pool while the metadata loader is checked.
+      // Keep each response and the parsed identity body bounded to 64 KiB.
+      await cdp.send('Network.enable', { maxTotalBufferSize: 1024 * 1024, maxResourceBufferSize: 65536, maxPostDataSize: 0 });
+    })();
+    opening.readers.set(page, pending);
+    return pending;
+  }
+  private async observeResponse(response: Response): Promise<void> {
+    try {
+      const request = response.request(), frame = request.frame(), page = frame.page();
+      const opening = this.owned.get(page);
+      if (!opening || !this.live(opening) || frame !== page.mainFrame()
+          || response.status() < 200 || response.status() >= 300) return;
+      const started = this.started.get(request);
+      if (!started || started.opening !== opening || started.page !== page
+          || started.epoch !== opening.epochs.get(page)) return;
+      // Preserve successful direct navigation/reload semantics; native popup documents
+      // are not sufficient evidence for a card-triggered opening.
+      if (['direct', 'leased'].includes(opening.phase) && request.isNavigationRequest()
+          && sameFile(response.url(), opening.key)) {
+        opening.identified.add(page); return;
+      }
+    } catch { /* Detached, unqualified or malformed data cannot establish identity. */ }
+  }
+  private live(opening: Opening): boolean {
+    return opening.valid && !opening.worker.stopping && this.workers.get(opening.account) === opening.worker
+      && (opening.phase === 'leased' || Date.now() < opening.deadline);
+  }
+  private navigationAllowed(opening: Opening, page: Page, url: string): boolean {
+    if (!this.live(opening) || opening.phase === 'closing') return false;
+    if (url === 'about:blank') return opening.phase === 'action' && page === opening.target;
+    if (sameFile(url, opening.key)) return opening.phase !== 'dashboard' && (!opening.target || opening.target === page);
+    return page === opening.opener && ['dashboard', 'action'].includes(opening.phase) && dashboardNavigation(url);
+  }
+  private invalidate(opening: Opening): void {
+    opening.valid = false;
+    for (const page of opening.pages) void page.close().catch(() => undefined);
+  }
+  private async claimPopup(worker: Worker, page: Page): Promise<boolean> {
+    const existing = this.owned.get(page);
+    if (existing) return existing.worker === worker && this.live(existing)
+      && page === existing.target && ['action', 'leased'].includes(existing.phase);
+    const opener = await page.opener();
+    // Routing and popup events may await the same opener lookup concurrently.
+    // The other claim can have adopted this exact page while this call was suspended.
+    const adopted = this.owned.get(page);
+    if (adopted) return adopted.worker === worker && this.live(adopted)
+      && page === adopted.target && ['action', 'leased'].includes(adopted.phase);
+    const opening = opener ? this.owned.get(opener) : undefined;
+    if (!opening || opening.worker !== worker || opening.worker.context !== page.context()
+        || !this.live(opening) || opening.phase !== 'action' || opening.target || opener !== opening.opener
+        || page.url() !== 'about:blank' && !sameFile(page.url(), opening.key)) return false;
+    opening.target = page;
+    opening.pages.add(page);
+    opening.epochs.set(page, 0);
+    this.owned.set(page, opening);
+    void this.documentLoads(opening, page).catch(() => undefined);
+    return true;
+  }
+  private async card(page: Page, key: string, deadline: number): Promise<ElementHandle<Node> | undefined> {
+    while (Date.now() < deadline && !page.isClosed()) {
+      const buttons = await page.locator('[role="listitem"] button').elementHandles();
+      if (buttons.length > 256) {
+        await Promise.all(buttons.map(button => button.dispose()));
+        fault('ui_unsupported', 'The rendered native card listing exceeds the bounded inspection limit.', 409);
+      }
+      const matches: ElementHandle<Node>[] = [];
+      for (const button of buttons) {
+        if (await button.evaluate(nativeCardMatches, key)) matches.push(button);
+        else await button.dispose();
+      }
+      if (matches.length === 1) return matches[0];
+      for (const button of matches) await button.dispose();
+      if (matches.length > 1) fault('ui_unsupported', 'The requested native card action is ambiguous.', 409);
+      await new Promise(resolve => setTimeout(resolve, 150));
+    }
+    return undefined;
+  }
+  async open(account: string, input: string, fileKey: string): Promise<BrowserTab> {
+    const file = fileUrl(input);
+    if (file.fileKey !== fileKey) fault('invalid_file', 'Requested URL and file key disagree.');
     if (this.status(account).state === 'authorizing') fault('account_busy', 'Account login is in progress.', 409);
     if (this.status(account).state === 'crashed') fault('browser_crashed', 'Restart or log in to recover the account.', 503);
     const worker = await this.ensure(account);
     const page = await worker.context.newPage();
-    const tab = new PlaywrightTab(page, worker.context, fileKey, worker.generation, () => valid && this.workers.get(account) === worker);
-    let valid = true;
-    const invalidate = () => { valid = false; void page.close().catch(() => undefined); };
-    page.on('crash', invalidate);
-    page.on('framenavigated', frame => {
-      if (frame === page.mainFrame() && !sameFile(frame.url(), fileKey)) invalidate();
-    });
+    const opening: Opening = { worker, account, key: fileKey, opener: page, pages: new Set([page]),
+      identified: new Set(), metadata: new Map(), epochs: new Map([[page, 0]]), readers: new Map(), cdp: new Set(), valid: true, phase: 'direct', deadline: Date.now() + LIMITS.operationMs };
+    this.owned.set(page, opening);
+    const remaining = () => Math.max(1, opening.deadline - Date.now());
+    const close = async () => {
+      opening.valid = false; opening.phase = 'closing';
+      // All closes are attempted, and confirmation covers every owned resource.
+      void Promise.allSettled([...opening.cdp].map(cdp => cdp.detach()));
+      const results = await Promise.allSettled([...opening.pages].map(p => p.isClosed() ? Promise.resolve() : p.close()));
+      if (results.some(result => result.status === 'rejected') || [...opening.pages].some(p => !p.isClosed())) {
+        fault('indeterminate', 'Opening resources could not all be confirmed closed.', 409);
+      }
+    };
+    const makeTab = (target: Page) => new PlaywrightTab(target, worker.context, fileKey, worker.generation,
+      () => this.live(opening) && opening.target === target && opening.identified.has(target), close);
+    let tab = makeTab(page);
     try {
-      const response = await page.goto(url, { waitUntil: 'domcontentloaded' });
-      if (response && response.status() >= 400 && response.status() !== 401) {
+      const response = await page.goto(file.url, { waitUntil: 'domcontentloaded', timeout: Math.min(10_000, remaining()) });
+      if (response?.status() === 403) {
+        // Selection requires normal editor navigation not yet supported by this fallback.
+        if (new URL(file.url).search) fault('ui_unsupported', 'Native dashboard opening does not yet support node/page selection.', 409);
+        if (!['file', 'design'].includes(new URL(file.url).pathname.split('/')[1]!)) {
+          fault('ui_unsupported', 'Native dashboard opening is qualified only for file/design cards.', 409);
+        }
+        opening.phase = 'dashboard'; opening.identified.clear();
+        const dashboard = await page.goto(dashboardUrl, { waitUntil: 'domcontentloaded', timeout: Math.min(10_000, remaining()) });
+        if (dashboard && dashboard.status() >= 400) fault('site_blocked', 'The normal dashboard returned an HTTP error.', 503);
+        const readiness = await probe(page);
+        if (['needs_login', 'permission_denied', 'consent_required'].includes(readiness)) fault(readiness, 'The normal dashboard requires user action.', 409);
+        const drafts = page.getByRole('button', { name: 'Drafts', exact: true });
+        await drafts.waitFor({ state: 'visible', timeout: Math.min(15_000, remaining()) });
+        let card = await this.card(page, fileKey, Math.min(opening.deadline - 1500, Date.now() + 1500));
+        if (!card) {
+          await drafts.click({ timeout: Math.min(5000, remaining()) });
+          await page.getByRole('heading', { name: 'Drafts', exact: true }).waitFor({ state: 'visible', timeout: Math.min(5000, remaining()) });
+          card = await this.card(page, fileKey, opening.deadline - 1500);
+        }
+        if (!card) fault('ui_unsupported', 'The requested existing file has no exact rendered native card in Recents or Drafts.', 409);
+        try {
+          if (!this.live(opening) || !await card.evaluate(nativeCardMatches, fileKey)) fault('ui_unsupported', 'The requested native card changed before activation.', 409);
+          if (!dashboardNavigation(page.url()) || await page.locator('canvas').count() !== 0) {
+            fault('ui_unsupported', 'Native opening requires a fresh dashboard without an inherited editor.', 409);
+          }
+          const oldText = await nativeButton(page, 'Text-tool'), oldFrame = await nativeButton(page, 'Frame-tool');
+          if (oldText || oldFrame) {
+            await oldText?.dispose(); await oldFrame?.dispose();
+            fault('ui_unsupported', 'Native opening requires a dashboard without native editor controls.', 409);
+          }
+          await bounded(this.documentLoads(opening, page), undefined, remaining());
+          // Capture the actual trusted card activation, not the start of Playwright's
+          // actionability wait. Requests initiated before this event cannot certify it.
+          const observer = await card.evaluateHandle(node => {
+            const time = new Promise<number>(resolve => {
+              node.addEventListener('dblclick', event => resolve(event.isTrusted
+                ? performance.timeOrigin + event.timeStamp : Number.POSITIVE_INFINITY), { once: true, capture: true });
+            });
+            return { time };
+          });
+          opening.actionTime = observer.evaluate(value => value.time);
+          void opening.actionTime.catch(() => undefined);
+          opening.phase = 'action'; // Permission is registered before the normal native action.
+          try { await card.dblclick({ timeout: Math.min(5000, remaining()) }); }
+          finally { await observer.dispose(); }
+        } finally { await card.dispose(); }
+      } else if (response && response.status() >= 400 && response.status() !== 401) {
         this.set(worker, 'site_blocked');
         fault('site_blocked', 'The site returned an HTTP error; this does not prove a missing login.', 503);
       }
-      const until = Date.now() + 15_000;
-      let state = await probe(page, fileKey);
-      while (state === 'ui_unsupported' && valid && Date.now() < until) {
-        await new Promise(resolve => setTimeout(resolve, 250));
-        state = await probe(page, fileKey);
+      const identityDeadline = Math.min(opening.deadline, Date.now() + 10_000);
+      let state: Readiness = 'ui_unsupported';
+      while (this.live(opening) && Date.now() < identityDeadline) {
+        if (!opening.target && sameFile(page.url(), fileKey) && opening.phase !== 'dashboard') opening.target = page;
+        const target = opening.target;
+        if (target && !target.isClosed() && target.url() !== 'about:blank') {
+          state = await editorReadiness(target, fileKey);
+          const identity = opening.metadata.get(target);
+          if (opening.phase === 'action' && state === 'ready' && identity?.key === fileKey
+              && identity.epoch === opening.epochs.get(target) && await filenameMatches(target, identity.name)
+              && await nativeEditorReady(target) && this.live(opening) && opening.metadata.get(target) === identity
+              && identity.epoch === opening.epochs.get(target)) opening.identified.add(target);
+          if (state === 'ready' && opening.identified.has(target)) break;
+          if (!['ready', 'ui_unsupported'].includes(state)) break;
+        }
+        await new Promise(resolve => setTimeout(resolve, 150));
       }
-      // A denied or unsupported file is target-specific, not account browser failure.
-      if (state === 'ready' || state === 'needs_login' || state === 'crashed') this.set(worker, state);
-      if (state !== 'ready' || !valid) fault(state, 'Figma editor readiness could not be confirmed.', 409);
+      const target = opening.target;
+      if (state !== 'ready' || !target || !this.live(opening) || !opening.identified.has(target)) {
+        fault(state === 'ready' ? 'ui_unsupported' : state, 'Requested document identity and editor readiness could not be confirmed; native document-load qualification is required.', 409);
+      }
+      tab = makeTab(target);
+      if (target !== page) {
+        const { bounded } = await import('./scheduler.js');
+        await bounded(page.close(), undefined, 5000);
+        if (!page.isClosed()) fault('indeterminate', 'Dashboard helper closure could not be confirmed.', 409);
+      }
+      await bounded(Promise.allSettled([...opening.readers.values()]), undefined, remaining());
+      await bounded(Promise.allSettled([...opening.cdp].map(cdp => cdp.detach())), undefined, remaining());
+      opening.cdp.clear();
+      if (opening.phase === 'action') {
+        const identity = opening.metadata.get(target);
+        if (!identity || identity.epoch !== opening.epochs.get(target)
+            || !await filenameMatches(target, identity.name) || !await nativeEditorReady(target)) {
+          fault('ui_unsupported', 'Native document identity changed before lease publication.', 409);
+        }
+        opening.metadata.clear();
+      }
+      if (!this.live(opening)) fault('target_invalid', 'Opening expired or lost its worker before handoff.', 409);
+      opening.phase = 'leased';
+      await tab.check();
+      if (!this.live(opening)) fault('target_invalid', 'Opening worker generation was lost.', 409);
+      this.set(worker, 'ready');
       return tab;
     } catch (error) {
       const { bounded } = await import('./scheduler.js');
-      try { await bounded(tab.close(), undefined, 5000); }
+      try { await bounded(close(), undefined, 5000); }
       catch { throw new BrowserOpenFailure(tab); }
-      if (!valid) this.set(worker, 'needs_login');
       if (!(error instanceof Fault)) {
-        this.set(worker, 'network_error');
-        fault('network_error', 'Figma navigation failed before editor readiness could be assessed.', 503);
+        fault(error instanceof Error && error.name === 'TimeoutError' ? 'ui_unsupported' : 'network_error', 'Figma opening failed before requested editor readiness.', 409);
       }
       throw error;
+    } finally {
+      // A leased target keeps lifetime guards; every other pending permission is revoked.
+      if (opening.phase !== 'leased') opening.valid = false;
     }
   }
   async login(account: string, confirm: () => Promise<void>): Promise<AccountStatus> {
@@ -246,19 +636,29 @@ export class BrowserSupervisor implements BrowserBackend {
 export class PlaywrightTab implements BrowserTab {
   readonly target = randomUUID();
   constructor(private readonly page: Page, private readonly context: BrowserContext,
-    private readonly fileKey: string, readonly generation: string, private readonly valid: () => boolean) {}
+    private readonly fileKey: string, readonly generation: string, private readonly valid: () => boolean,
+    private readonly cleanup?: () => Promise<void>) {}
   async check(write = false): Promise<void> {
     if (!this.valid() || this.page.isClosed()) fault('target_invalid', 'Target generation is no longer valid.', 409);
-    await requireEditor(this.page, this.fileKey);
-    if (write) await requireEditing(this.page);
+    const state = await editorReadiness(this.page, this.fileKey);
+    if (state !== 'ready') fault(state, 'The leased Figma editor is no longer ready.', 409);
+    if (write) {
+      try { await requireEditing(this.page); }
+      catch (error) {
+        if (!(error instanceof Fault) || error.code !== 'editing_unsupported'
+            || !await nativeEditorReady(this.page)) throw error;
+      }
+    }
+    if (!this.valid() || this.page.isClosed()) fault('target_invalid', 'Target generation was lost during its readiness check.', 409);
   }
-  close(): Promise<void> { return this.page.isClosed() ? Promise.resolve() : this.page.close(); }
+  close(): Promise<void> { return this.cleanup ? this.cleanup() : this.page.isClosed() ? Promise.resolve() : this.page.close(); }
   inspect(): Promise<Record<string, unknown>> { return inspection(this.page); }
   readValue(locator: LocatorSpec): Promise<string> { return readValue(this.page, locator); }
   async reload(): Promise<void> {
-    await this.page.reload({ waitUntil: 'domcontentloaded' });
+    const response = await this.page.reload({ waitUntil: 'domcontentloaded' });
+    if (response && response.status() >= 400) fault('site_blocked', 'Reload returned an HTTP error; reopen the file with a new lease.', 409);
     const until = Date.now() + 15_000;
-    while (await probe(this.page, this.fileKey) === 'ui_unsupported' && Date.now() < until) {
+    while (await editorReadiness(this.page, this.fileKey) === 'ui_unsupported' && Date.now() < until) {
       await new Promise(resolve => setTimeout(resolve, 200));
     }
     await this.check();

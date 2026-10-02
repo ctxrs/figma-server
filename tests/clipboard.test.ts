@@ -7,6 +7,7 @@ import { chromium, type BrowserContext } from 'playwright';
 import { BrowserSupervisor } from '../src/browser-supervisor.js';
 import { Core } from '../src/core.js';
 import { Fault } from '../src/errors.js';
+import type { Receipt } from '../src/receipts.js';
 import { Metadata, State } from '../src/state.js';
 import { open, setup } from './helpers.js';
 
@@ -83,10 +84,14 @@ for (const headless of [true, false]) {
     const pages = context.pages().filter(page => page.url().includes('/design/'));
     assert.equal(pages.length, 2);
     const read = async (session: string, lease: string) => (await core.call(session, 'figma.read_value', { lease, locator }) as { value: string }).value;
-    await core.call(a, 'figma.click', { lease: first.lease, locator });
-    await core.call(a, 'figma.keypress', { lease: first.lease, keys: 'ControlOrMeta+A' });
-    await core.call(b, 'figma.click', { lease: second.lease, locator });
-    await core.call(b, 'figma.keypress', { lease: second.lease, keys: 'ControlOrMeta+A' });
+    const mutate = async (session: string, name: string, args: unknown) => {
+      const receipt = await core.call(session, name, args) as Receipt;
+      assert.ok(receipt.status === 'verified' || receipt.status === 'unverified', `${name}: ${JSON.stringify(receipt)}`);
+    };
+    await mutate(a, 'figma.click', { lease: first.lease, locator });
+    await mutate(a, 'figma.keypress', { lease: first.lease, keys: 'ControlOrMeta+A' });
+    await mutate(b, 'figma.click', { lease: second.lease, locator });
+    await mutate(b, 'figma.keypress', { lease: second.lease, keys: 'ControlOrMeta+A' });
     const before = await Promise.all(pages.map(page => page.evaluate(() => (window as unknown as { effects: number }).effects)));
     const jobs = await readdir(state.path('artifacts'));
     for (const keys of ['ControlOrMeta+C', 'ControlOrMeta+X', 'ControlOrMeta+V', 'ControlOrMeta+Shift+R']) {
@@ -100,10 +105,10 @@ for (const headless of [true, false]) {
     assert.deepEqual(await Promise.all(pages.map(page => page.evaluate(() => (window as unknown as { effects: number }).effects))), before);
     assert.deepEqual(await readdir(state.path('artifacts')), jobs);
     assert.equal(await read(a, first.lease), 'ALPHA'); assert.equal(await read(b, second.lease), 'BETA');
-    await core.call(a, 'figma.type_text', { lease: first.lease, text: 'DIRECT_A' });
-    await core.call(b, 'figma.type_text', { lease: second.lease, text: 'DIRECT_B' });
+    await mutate(a, 'figma.type_text', { lease: first.lease, text: 'DIRECT_A' });
+    await mutate(b, 'figma.type_text', { lease: second.lease, text: 'DIRECT_B' });
     assert.equal(await read(a, first.lease), 'DIRECT_A'); assert.equal(await read(b, second.lease), 'DIRECT_B');
-    await core.call(a, 'figma.fill', { lease: first.lease, locator, text: 'FILLED_A' });
+    await mutate(a, 'figma.fill', { lease: first.lease, locator, text: 'FILLED_A' });
     assert.equal(await read(a, first.lease), 'FILLED_A'); assert.equal(await read(b, second.lease), 'DIRECT_B');
     const target = core.sessions.get(a, first.lease).target;
     await core.call(a, 'figma.reload', { lease: first.lease });

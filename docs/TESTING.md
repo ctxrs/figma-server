@@ -107,7 +107,7 @@ prove actual launch and sandbox behavior separately.
 | Integration | Production MCP and JSON HTTP reject missing/wrong bearer credentials, hostile Host/Origin, cross-session leases and arbitrary Runtime CDP. Same-file writes serialize across adapters; different-file operations overlap. | Local intercepted editor in a real browser; one trusted local operator, not a multitenant security guarantee. |
 | Package/e2e | Install the npm archive with production dependencies only outside the checkout, including spaces in paths. CLI init/doctor and exclusive profile locking pass. Real full Chromium passes isolated tabs/PNGs, navigation denial, profile persistence, OS process termination and recovery on native OS/Node rows. | Record OS architecture, browser mode/version and archive SHA. An authored or skipped CI row is not a pass. |
 | Headed fixture | Explicit graphical bootstrap survives opening the login page, excludes concurrent account access, closes and reopens the same profile headlessly. | Xvfb is startup/lifecycle evidence, not human sign-in or desktop integration evidence. |
-| Live/manual | On at least one OS, sign in with an authorized disposable account, reopen headlessly, edit a known disposable Figma design, observe save, close and reopen to verify persistence. | Record the exact auth method/file type. Keep SSO/MFA/passkeys, other Figma file types, Windows 11 interaction and untested architectures explicitly unproven. |
+| Live/manual | On at least one OS, sign in with an authorized disposable account, reopen headlessly, edit a known disposable Figma design, read back actual properties and rendered results, then close/reopen and restart the browser to check persistence. | Record the exact auth method/file type and observed save UI state, leaving it unknown when no indicator is identifiable. Keep other auth methods, file types, Windows interaction and untested architectures explicitly unproven. |
 
 Browser discovery has separate gates: bundled mode uses the matching installed
 Playwright full Chromium; explicit system mode accepts an absolute executable
@@ -120,19 +120,29 @@ evidence. Do not qualify an implicitly chosen personal browser profile.
 `.github/workflows/qualification.yml` is configured to run Ubuntu 24.04,
 macOS 14, and Windows Server 2022 on Node 22 and 24. It uses the lockfile,
 installs full Chromium, and qualifies the actual npm archive. Actions are
-pinned; only credential-free
-evidence is uploaded. A configured matrix is not native execution evidence.
+pinned; only credential-free evidence is uploaded. A configured matrix is
+not native execution evidence.
 
-Before release, require passing native archive/browser fixtures for each
-claimed OS and Node version, plus real authenticated headed login → headless
-reopen → persisted disposable Figma edit/save on at least one OS. Record that
-OS, browser, file type and auth method; the fixture matrix does not establish
-live editing on the other platforms. Verify invalid/missing
-bearer tokens, Host/Origin checks, lease ownership, narrow CDP policy, same-file
-write serialization and different-file concurrency across MCP/JSON clients.
-Use a disposable account and known file; do not upload live screenshots,
-cookies, profile databases, or raw traces. Windows Server headless CI does not
-prove Windows 11 interactive login; Intel execution does not prove Apple silicon.
+For a v0.1 prerelease, the installed public CLI/MCP Design workflow must pass
+on at least one recorded native lane: actual content or editable property
+readback and rendered result, release/reopen, and persistence after one
+daemon/browser restart. Record any identifiable save indicator separately;
+unknown save UI state must remain explicit. Observed property persistence does
+not establish a save transaction or independent cloud durability. Independent
+clients must show overlapping operations on different files with target
+isolation, and same-file writer
+exclusion across MCP and JSON API. Internal UI actions, a layer label or a
+successful sign-in alone do not meet this gate.
+
+After that workflow works, require final source checks on Node 22 and 24 and
+the Linux headed lifecycle fixture, then bind the qualified runtime to the
+final archive. Verify its production install, published download digest and
+launcher/protocol smoke. Preserve unchanged security and platform evidence
+within its scope. Additional OSes and editor types may remain unqualified in
+a scoped prerelease; each claimed supported configuration needs actual native
+evidence. Keep live screenshots, cookies, profile databases and raw traces
+private. Windows Server headless CI does not prove Windows 11 interactive
+login; Intel execution does not prove Apple silicon.
 
 ## Recorded native qualification: 2026-10-01
 
@@ -153,8 +163,9 @@ are qualified separately below; they are not covered by baseline reuse.
 Ubuntu bundled Chromium failed with Playwright's "No usable sandbox" diagnostic;
 the sandbox stayed enabled. The explicit system-browser pass is retained as
 separate evidence. No bundled macOS or macOS Node 24 pass was recorded. The
-hosted six-row Actions workflow was linted but could not execute because of
-the account billing lock. These gaps must remain visible in support claims.
+latest hosted [six-row Actions run](https://github.com/ctxrs/figma-server/actions/runs/36952312480)
+failed in all six jobs without test steps executing. Hosted CI has no recorded
+pass. These gaps must remain visible in support claims.
 
 A subsequent candidate, SHA-256
 `f75f61ecfa1a25a6d37c0cd5e1eae04a5a5e71c1d85cf3e09e238cdbeb16a73b`,
@@ -238,6 +249,16 @@ The failing DLL and logon/session cause were not identified. Ordinary-user
 Windows setup remains **unproven**. Both runs' receipts are retained outside
 the checkout; owned cleanup completed and the bounded probe was not retried.
 
+A later bounded ordinary-user replay used a separate candidate, SHA-256
+`591a9d0db7d1a73fa63c5dac037ecbdc8927d35aaddab2bf6fa13b669db38548`.
+It started its credential-launched child with verified access to the owned
+window station and desktop, but the child
+again exited `0xC0000142` (`STATUS_DLL_INIT_FAILED`) before ordinary-user
+identity or Node execution. Zero product tests ran; the root cause remains
+unknown and no product failure was established. Owned cleanup completed and
+sealed evidence was retained. This does not qualify ordinary-user setup or
+later file-entry changes.
+
 The focused suite runs two tests:
 
 - Real headless Chromium through installed Core, HTTP and the actual local npm
@@ -310,6 +331,95 @@ remains a separate gate.
 
 ## Live default-profile qualification: through 2026-10-02 UTC
 
+The final frozen Linux source passed all 139 tests on each of Node 22.22.2 and
+24.21.0, with zero failures or skips. Both runs included enabled headed fixtures
+under Xvfb with sandboxed system Chrome 150.0.7871.124. Build and no-emit
+typechecking exited 0 on both runtimes; their compiled outputs matched. The
+supervisor SHA-256 is
+`a70d94ac20f6a16cc03047276d4840fc029566fea64d4046e36cbaaccc1e476e`,
+the native-opening test SHA-256 is
+`7ca15400ff4ba5be56fa119a6f82ff4f53352e8a6a31444d07c87e7a10545af7`,
+and the clipboard test SHA-256 is
+`7eb7c6d3eebc685ec5763a2019e080505081488b0767f32634ae15ded5482ca5`.
+Independent static review passed. These results qualify Linux source fixtures,
+not authenticated editing or other platforms. An earlier 136-test snapshot
+retains its Node 24 headed clipboard `invalid_lease` failure; an isolated rerun
+passed without reproducing it.
+
+The reviewed public QA archive has SHA-256
+`297b5981e84be049d92e58a3241a9eed73f23d53b3dcf1e070f6e8caccf34dbd`,
+105,196 bytes and 45 payload files, including 39 compiled files and 13 runtime
+JavaScript modules. Its compiled supervisor SHA-256 is
+`518c489ac58102b237af4941d4054f6f954185c8161d7b09adf495c99ed65012`.
+All 45 installed payload hashes matched on Linux and macOS. These hashes
+identify the retained QA archive, before the final documentation pack; a
+documentation-only release pack must retain identical compiled files.
+
+On Linux with Node 22.22.2, the actual installed public CLI, MCP stdio and
+independent JSON API used the platform's default state directory. Native field
+readback verified a Frame at 640 by 400 and a Rectangle width of 120. Those
+values survived three ordinary MCP release/reopen cycles, a JSON API Rectangle
+reopen, and one CLI daemon/browser restart. Both objects' native fields were
+read again after the restart, and rendered crops were independently reviewed.
+Reopening also passed while another file remained held. This qualifies the
+observed Design property workflow and persistence in those runs.
+
+On macOS 26.2 ARM64 with Node 25.2.1 and system Chrome 154.0.8037.95, the actual
+installed public CLI and MCP used the platform's default state directory. MCP
+read the same Frame's Width 640 and Height 400 and the Rectangle's Width 120,
+then released, reopened and reselected each object to verify the fields again.
+This macOS run performed no native edits and copied no authenticated profile.
+It independently observed the Linux edits across machines; it
+qualifies macOS reading and normal reopening, separately from the older Node
+22 native fixtures.
+
+Both runs completed cleanup with no owned browser processes or default daemon
+lock remaining, and the service port was free. No saved/saving indicator was
+identified; save UI state remains unknown. Linux visual review found no offline
+or saving-failure banner. These observations do not establish a save transaction,
+cache-independent cloud durability or a guarantee for future calls. macOS
+editing, ordinary-user Windows, other editor types, native text-content
+readback, image insertion/save and component/style workflows remain unqualified.
+
+The source now preserves an allowed dashboard when a blocked external iframe
+renders a browser error page; the external request remains blocked. A separate
+controlled Chrome fixture reproduced inspector response-body eviction on the
+earlier supervisor snapshot
+`9632a346f74b67d634daa327399b51b73557e2295953a30afa47b4d73c0d1063`
+and passed after a bounded inspector-pool change. This establishes that fixture's
+eviction defect. The exact error behind the original intermittent native
+metadata-body retrieval failure was not captured and remains unclassified.
+
+The earlier file-entry archive has SHA-256
+`cbe0e3e690f2c8d7f639f67bfe4f3b177f2376ca44c65fc3bc84c27e4b84e906`,
+103,234 bytes. It predates the iframe fix and is not the final release archive.
+Its macOS attempt was blocked by lab disk admission before browser or public
+client execution; that historical result does not describe the newer run above.
+The Windows ordinary-user replay used the separate 591 candidate. Earlier f4
+and internal UI results below retain their original runtime scope.
+
+The installed Linux candidate has SHA-256
+`ef925ce4ec37f78393584b2178e98950f90c65aeda50eca31fad7b321a717653`.
+All 45 installed payload files matched the candidate. On Node 22.22.2, the actual
+public CLI, MCP stdio and independent JSON API connected, and a public writer
+opened the known Design file. Public inputs created a native Frame; editable
+Width/Height readback showed 600 by 399. Filling the native fields, committing
+with Enter and calling `read_value` verified the intended 600 by 400 dimensions.
+This establishes editable-property readback, not native text-content readback.
+
+Public same-file writer handoff passed: a JSON API writer waited while the MCP
+writer held the lease, then acquired it after release and read back the same
+600 by 400 native fields. Independent clients also passed overlapping native
+operations on different files, reading back widths of 640 and 120 with file
+isolation. Normal reopening after release failed with `ui_unsupported` because
+document identity and editor readiness could not be confirmed. The failed
+metadata-body retrieval also blocked identity verification in a later
+initial-entry diagnostic, despite a visible editor. Observable saving and
+reopen/restart persistence were not qualified in that run. Its same-file
+handoff and different-file overlap evidence remains scoped to ef925; the
+scheduler is unchanged in the reviewed 297b runtime. The newer persistence
+results above qualify the completed core property lane.
+
 On Linux, authorized password sign-in to the dedicated default profile
 persisted after closing and reopening the browser headlessly. The actual
 globally installed CLI payload matched the retained f4 archive's 45 files.
@@ -317,20 +427,45 @@ Public CLI `run`, MCP stdio and an independent JSON API client were checked
 against the platform’s default state directory, without an injected State
 root. This establishes the default setup and connection path for that run.
 
-Normal Figma UI setup created two known private Drafts Design fixtures and
-showed an editable canvas. No native edits were attempted or qualified.
+On macOS 26.2 ARM64, password sign-in through a normal UI helper also persisted
+across headless reopen of the profile in the platform’s default state directory.
+This run used Node 25.2.1 and sandboxed system Chrome 154.0.8037.95; it is
+separate from the Node 22 native fixtures above. The installed public CLI
+payload matched all 45 files in the retained f4 archive. The actual public CLI
+and MCP connection worked, and an independent JSON API client created a session
+with HTTP 201. Public opening through that installed package still failed:
+Figma's main-document response was HTTP 403, MCP/Core reported `site_blocked`,
+and the local JSON API returned HTTP 503 with `site_blocked`. No file was
+created or edited in this
+run. The helper login does not qualify the frontend `figma-server login`
+command, and machine-reboot persistence was not tested.
+
+During the earlier f4 Linux run, normal Figma UI setup created known private
+Drafts Design fixtures and showed an editable canvas. That run did not attempt
+native edits.
 Public `figma.open` failed with HTTP 403 before editor readiness for both the
 full observed creation URL and the bare canonical URL. Filename normalization
 is not a proven cause or fix. The creation flow made no main-document requests,
 so its ready canvas does not establish that direct file navigation works.
 
-The prepared normal in-app existing-file navigation diagnostic was queued but
-not admitted before its cap: zero methods ran. It adds no site or guard-policy
-conclusion. Native text/shape/image edits, modifier behavior in Figma, save and
-reload/restart persistence remain unverified. There is no cloud durability
-proof. Other auth methods, FigJam, Slides, Windows interactive sign-in and
-macOS live editing remain unproven. Authenticated Design
-edit/readback/save/reopen qualification remains required before release.
+On macOS, ordinary UI opening of a known private Design file succeeded:
+the card key, target URL and file-data HTTP 200 responses matched the owned
+file, and a native editor rendered. Filename rename input and readback passed,
+and native text insertion was dispatched. The filename and a native Text layer
+label matching the inserted text survived editing-tab close and reopening
+through the card from a fresh dashboard in the same signed-in profile. That
+label does not independently verify actual text content or canvas glyphs.
+
+That internal run did not identify a save indicator or observe explicit
+saved/saving text. It did not qualify public CLI/MCP editing. The dashboard
+listing rendered;
+earlier stalled-listing checks mistook transparent retained loading elements
+for visible placeholders. The private diagnostic checks were corrected to
+account for computed opacity; no production browser-mode or navigation-policy
+change was established by that finding. Other auth methods, FigJam, Slides and
+Windows interactive sign-in remain unproven. The completed public property
+workflow is qualified above; these older internal observations retain their
+separate scope.
 
 ## Governed Windows replay
 

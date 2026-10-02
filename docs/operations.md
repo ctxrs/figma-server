@@ -114,12 +114,13 @@ The production state location is fixed by the operating system:
 
 | Platform | State directory |
 | --- | --- |
-| Linux | `~/.local/state/figma-server` |
+| Linux | `~/.figma-server` |
 | macOS | `~/Library/Application Support/figma-server` |
 | Windows | `%USERPROFILE%\AppData\Local\figma-server` |
 
 These paths come from the implementation; they are not evidence of completed
-platform testing. There is no production data-directory environment override.
+platform testing. Each is resolved from the current user's home directory.
+There is no production data-directory environment override.
 
 ```text
 <state-directory>/

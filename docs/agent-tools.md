@@ -36,22 +36,39 @@ figma.open({"file_url":"<your accessible Figma file URL>","mode":"write"})
 figma.inspect({"lease":"<returned UUID>"})
 figma.screenshot({"lease":"<returned UUID>"})
 figma.read_value({"lease":"<returned UUID>","locator":{"by":"label","name":"Width"}})
-figma.fill({"lease":"<returned UUID>","locator":{"by":"label","name":"Width"},"text":"360"})
+figma.fill({"lease":"<returned UUID>","locator":{"by":"label","name":"Width"},"text":"600"})
+figma.keypress({"lease":"<returned UUID>","keys":"Enter"})
 figma.read_value({"lease":"<returned UUID>","locator":{"by":"label","name":"Width"}})
-figma.wait_for({"lease":"<returned UUID>","predicate":{"saved":true}})
-figma.reload({"lease":"<returned UUID>"})
-figma.read_value({"lease":"<returned UUID>","locator":{"by":"label","name":"Width"}})
-figma.screenshot({"lease":"<returned UUID>"})
+  -> if an identifiable save indicator is available:
+     figma.wait_for({"lease":"<returned UUID>","predicate":{"saved":true}})
 figma.release({"lease":"<returned UUID>"})
+figma.open({"file_url":"<the same Figma file URL>","mode":"write"})
+  -> keep the new returned lease
+figma.inspect({"lease":"<new returned UUID>"})
+  -> reselect the same object before checking its field
+figma.read_value({"lease":"<new returned UUID>","locator":{"by":"label","name":"Width"}})
+figma.screenshot({"lease":"<new returned UUID>"})
+figma.release({"lease":"<new returned UUID>"})
 ```
 
 This is a conditional tool flow, not a promise that every editor exposes that
 label. Substitute the observed label and compare the returned value after the
-edit and reload. Recheck selection after reload before interpreting readback.
-If the field, save indicator, or expected result cannot be observed, report it
-as unverified. Do not repeat an uncertain write automatically. A reload checks
-the current browser's view of the file; it does not establish native node
-structure or a transactional save guarantee.
+edit and reopening. Recheck selection before interpreting readback.
+Report verified field values separately from saving. If no save indicator is
+identifiable, leave save state unknown. Do not repeat an uncertain write
+automatically. A same-profile reopen checks the current browser's view of the
+file; it does not establish native node structure or independent cloud
+durability. `figma.reload` performs a document reload and can receive
+`site_blocked`; release and reopen with
+`figma.open` to use the normal file-entry path. A Text layer label alone does
+not verify the layer's actual text content.
+
+The recorded public Design workflow verified native property edits on Linux
+after release/reopen and one browser restart. macOS independently read those
+properties and reopened the files through public MCP, without editing them.
+The save UI state remained unknown. See [qualification scope](TESTING.md) for
+the exact runtimes, archive and separate limits on native text, images and
+component/style workflows.
 
 ## Supplying an image
 
@@ -88,12 +105,13 @@ upload operations. Ordinary calls and cancellation can continue while uploads
 are pending. Wait for earlier calls to settle before submitting more images.
 
 Delivery to the chooser does not prove native Figma insertion or saving.
-Inspect the result, take a screenshot, check the save indicator, and reopen or
-reload before claiming persistence. An optional `expectation` checks only its
+Inspect the result, take a screenshot, check the save indicator, then release
+and reopen before claiming persistence. An optional `expectation` checks only its
 specified observable condition; without one the receipt remains `unverified`.
-Source and MCP transport checks have passed for the new contracts. Their native
-fixture qualification is in progress; earlier browser fixture passes do not
-establish these primitives or live Figma behavior.
+Native upload/modifier fixtures passed on Linux Node 22/24, macOS ARM64 Node 22,
+and Windows Node 22/24 under an elevated token. They accepted a 301,493-byte
+image MCP frame; that is not a native test of the full 8 MiB limit or proof of
+authenticated Figma insertion/save. See [qualification scope](TESTING.md).
 
 ## Tool reference
 
@@ -348,6 +366,14 @@ IP hosts are rejected. The file key is used as document identity. Numeric
 parts separated by `-` or `:`, and cannot be repeated. Other query parameters
 and the title path are discarded. A deep link passes the selection to Figma;
 inspect the editor before assuming the requested node is selected.
+
+If direct navigation is blocked and dashboard opening is needed, use a plain
+`file` or `design` URL without `node-id` or `page-id`. The dashboard fallback
+does not support selection queries, FigJam, Slides or prototype routes.
+It requires an exact file-key match on a rendered card in Recents or Drafts;
+a matching title alone is insufficient. It does not provide general file
+discovery or file creation.
+Accepted URLs do not establish native editor support for each file type.
 
 HTML validation accepts a small set of inert text/structure tags, bounded to
 64 KiB. Attributes, CSS, media, links, scripts, iframes, forms, SVG, and MathML
