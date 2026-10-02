@@ -83,6 +83,33 @@ For a first edit, use a disposable file:
 
 Building your own agent? Use the [JSON HTTP API](docs/agent-tools.md#json-http-api). The [agent tools guide](docs/agent-tools.md) has the arguments and examples.
 
+### Add the skill or plugin
+
+Give your agent the [portable skill](skills/figma-server/SKILL.md):
+
+```sh
+npx skills add ctxrs/figma-server --skill figma-server
+```
+
+The skill needs the MCP connection above. The plugin bundles the skill and MCP
+configuration, but you still need to install the CLI, sign in and keep the server
+running. For Codex:
+
+```sh
+codex plugin marketplace add ctxrs/figma-server
+codex plugin add figma-server@ctxrs-figma-server
+```
+
+For Claude Code, use its slash commands:
+
+```text
+/plugin marketplace add ctxrs/figma-server
+/plugin install figma-server@ctxrs-figma-server
+```
+
+See [skills and plugin setup](docs/integrations.md) for manual installation and
+other clients.
+
 ## FAQ
 
 ### Can I use Figma at the same time as my agent?

@@ -1,0 +1,15 @@
+{
+  "name": "ctxrs-figma-server",
+  "owner": {
+    "name": "ctxrs"
+  },
+  "metadata": {
+    "description": "Work in Figma through your own agents with JavaScript and full CDP."
+  },
+  "plugins": [
+    {
+      "name": "figma-server",
+      "source": "./"
+    }
+  ]
+}

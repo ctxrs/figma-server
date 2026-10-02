@@ -1,0 +1,20 @@
+{
+  "name": "figma-server",
+  "version": "0.1.0",
+  "description": "Work in your Figma account through figma-server's browser tools, JavaScript and full CDP. Requires figma-server 0.2.0 or newer.",
+  "author": {
+    "name": "ctxrs",
+    "url": "https://github.com/ctxrs"
+  },
+  "homepage": "https://github.com/ctxrs/figma-server",
+  "repository": "https://github.com/ctxrs/figma-server",
+  "license": "Apache-2.0",
+  "keywords": ["figma", "design", "browser", "cdp", "mcp"],
+  "mcpServers": {
+    "figma-server": {
+      "type": "stdio",
+      "command": "figma-server",
+      "args": ["mcp"]
+    }
+  }
+}
