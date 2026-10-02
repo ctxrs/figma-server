@@ -117,9 +117,10 @@ guidance. Existing config/secret files must survive repeated init. Test system
 mode on a representative native host; it does not replace missing bundled-mode
 evidence. Do not qualify an implicitly chosen personal browser profile.
 
-`.github/workflows/qualification.yml` runs Ubuntu 24.04, macOS 14, and Windows
-Server 2022 on Node 22 and 24. It uses the lockfile, installs full Chromium,
-and qualifies the actual npm archive. Actions are pinned; only credential-free
+`.github/workflows/qualification.yml` is configured to run Ubuntu 24.04,
+macOS 14, and Windows Server 2022 on Node 22 and 24. It uses the lockfile,
+installs full Chromium, and qualifies the actual npm archive. Actions are
+pinned; only credential-free
 evidence is uploaded. A configured matrix is not native execution evidence.
 
 Before release, require passing native archive/browser fixtures for each
@@ -155,12 +156,6 @@ separate evidence. No bundled macOS or macOS Node 24 pass was recorded. The
 hosted six-row Actions workflow was linted but could not execute because of
 the account billing lock. These gaps must remain visible in support claims.
 
-All successful editor interactions above used controlled local fixtures.
-The macOS live login page rendered with HTTP 200; the Community probe returned
-403. Neither establishes authenticated editing. Real authenticated edit/save
-qualification on at least one OS remains required before release; other auth
-methods, file types and native interactive flows retain their stated limits.
-
 A subsequent candidate, SHA-256
 `f75f61ecfa1a25a6d37c0cd5e1eae04a5a5e71c1d85cf3e09e238cdbeb16a73b`,
 passed full installed-archive qualification on Ubuntu/Node 22.22.2 with system
@@ -193,7 +188,7 @@ fix. Both failed and passing receipts are retained outside the checkout; the
 passing summary is `windows-qualification.json`. These results qualify f75's
 Windows ACL/launcher behavior, not a later archive or live Figma editing.
 
-## Focused upload/modifier qualification: 2026-10-01
+## Focused upload/modifier qualification: through 2026-10-02 UTC
 
 The coherent candidate is SHA-256
 `1c0e8505fccbb3b51272c7461ecf3c1086301676ab8356243aeebafeed29d910`,
@@ -204,11 +199,20 @@ compiled JavaScript in the archive matched the frozen build. The focused runner
 requires `--archive`, installs production dependencies and does not rebuild,
 repack, or repeat the baseline CLI/crash/auth matrix.
 
+The later draft archive has SHA-256
+`f4bdaceaf62c12e635913842f3fa50a5de6f5304fc34fef267e8a164f084c9ac`,
+91,882 bytes and 45 package files. All 39 compiled files, including 13 runtime
+JavaScript files, are byte-identical to the 1c archive above. Only README.md,
+docs/TESTING.md, docs/agent-tools.md and docs/operations.md changed in that
+archive. This binding carries forward evidence for the unchanged runtime;
+the exact f4 archive has not passed the entire native matrix. These hashes
+identify the retained archives, not a repack of later documentation edits.
+
 | Native environment | Node | Actual browser | Focused result |
 | --- | --- | --- | --- |
 | Ubuntu 24.04.4, x64 | 22.22.2 and 24.21.0 | System Chrome 150.0.7871.124, sandbox enabled | Each runtime passed three qualification steps and two tests, zero failures/skips. `ControlOrMeta` resolved to Control. |
 | macOS 26.2 (25C56), ARM64 | 22.22.2 | System Chrome 154.0.8037.92, sandbox enabled | Three qualification steps and two tests passed, zero failures/skips. `ControlOrMeta` resolved to Meta. |
-| Windows x64 | Planned 22.23.3 and 24.21.0 | Planned full bundled Chromium | Blocked before execution: replay `req-5161cadfa4c54fc9` timed out after five minutes awaiting disk admission. No new Windows feature tests ran. |
+| Windows x64, OS release `10.0.26200` | 22.23.3 and 24.21.0 | Full bundled Chromium 153.0.8010.12, sandbox enabled | Each runtime passed three qualification steps and two tests, zero failures/skips, under an elevated token. Actual local/global npm `.cmd` launcher qualification also passed on Node 22. |
 
 Passing receipts are `linux-node22-receipt.json`, `linux-node24-receipt.json`
 and `macos-receipt.json`, retained outside the checkout.
@@ -217,15 +221,22 @@ no remaining task browser processes. Its temporary remote root was removed
 only after verifying all eight retained success/failure proof-file hashes.
 Earlier baseline digests do not qualify these new features.
 
-The Windows sealed receipt is exit 70 with zero guest-output bytes; the outer
-replay command exited 75. This is an admission failure, not a product test
-failure or a skipped pass. Its receipt is retained in `windows-admission-receipt.json`
-and the governed log in `windows-replay-runner.log`. After reviewed cleanup of
-two completed task-owned overlays, the 20:56:12 UTC snapshot still had
-106,616,532,992 free bytes against the unchanged 107,374,182,400-byte minimum.
-Original sealed bundles and success/failure receipts remain retained separately.
-New Windows upload/modifier/stdio/deadline qualification remains pending;
-the earlier f75 elevated-token ACL/launcher pass retains its narrower scope.
+Windows replay `req-1aeb538a28834d28` ran the 1c archive and passed five primary
+tests with zero skips: two focused tests on each Node runtime and one Node 22
+launcher test. The local/global `.cmd` checks passed help/init, MCP handshake,
+natural EOF exit 0 and zero remaining sessions/leases. Their backend was inert;
+the focused tests used real Chromium. The overall sealed replay and outer
+command still exited 1 because its ordinary-user child failed before producing
+identity or test evidence. That failure does not invalidate the recorded
+elevated-token passes, and the run is not an overall exit-0 qualification.
+
+The separate ordinary-user replay `req-c3c0b9095291486c` used the f4 archive.
+Its PowerShell child exited `-1073741502` (`0xC0000142`,
+`STATUS_DLL_INIT_FAILED`) before identity, Node or CLI preflight, with empty
+stdout and stderr. Zero product tests ran; no product failure was established.
+The failing DLL and logon/session cause were not identified. Ordinary-user
+Windows setup remains **unproven**. Both runs' receipts are retained outside
+the checkout; owned cleanup completed and the bounded probe was not retried.
 
 The focused suite runs two tests:
 
@@ -256,19 +267,11 @@ Both failed reports remain retained; neither correction changed product code.
 
 Windows additionally audits current-SID ownership and protected DACLs on state,
 profile, SQLite, upload receipts and PNGs, recording the actual token type. Use
-full bundled Chromium with its sandbox enabled. Expected lab coverage remains
+full bundled Chromium with its sandbox enabled. Recorded lab coverage uses
 the elevated token; ordinary non-admin setup is unproven. macOS must record
 `arch: arm64` and actual system Chrome; its mouse events must show Meta rather
 than Control. Linux uses a real headless browser; no graphical login is needed
 for the independent deadline fixture. Fixed port 4317 must be free.
-
-A bounded standard-token Windows probe was assessed but not executed because
-no guest was admitted. The existing loaded-profile launcher targets its current
-provisioned account; it does not directly launch a new standard account. Any
-optional follow-up needs an isolated guest-only launcher, `IsAdmin=false`,
-current-SID private ACLs, one native Chromium upload and the independent CLI
-deadline. Ordinary-user support remains unproven; this is not an additional
-broad release matrix or permission to change machine policy/operator profiles.
 
 After source/archive admission, run Linux and macOS separately:
 
@@ -286,7 +289,7 @@ node scripts/qualify.mjs --archive /absolute/path/coherent-candidate.tgz \
 ```
 
 The Windows builder accepts `--suite primitives` and the replay entry uses that
-selection for both verified Node runtimes. The current sealed bundle is
+selection for both verified Node runtimes. The initial focused replay bundle was
 `windows-qualification.tar`, retained outside the checkout,
 SHA-256 `3e1de63550a3e9049a9368152d65d74ba5109b09d87ea8eeef9b4fbac48354f6`.
 Do not invoke qualification before source admission:
@@ -302,8 +305,32 @@ Require exit 0, untruncated output and explicit Node pass summaries containing
 `primitives.json` and `login-deadline.json`; retain archive SHA and actual OS,
 architecture, Node, browser and token scope. No native evidence is created by
 syntax checks. These fixtures do not prove authenticated Figma image placement,
-held-modifier UI compatibility, or persisted native edits; human login remains
-required for that separate gate.
+held-modifier UI compatibility, or persisted native edits; live qualification
+remains a separate gate.
+
+## Live default-profile qualification: through 2026-10-02 UTC
+
+On Linux, authorized password sign-in to the dedicated default profile
+persisted after closing and reopening the browser headlessly. The actual
+globally installed CLI payload matched the retained f4 archive's 45 files.
+Public CLI `run`, MCP stdio and an independent JSON API client were checked
+against the platform’s default state directory, without an injected State
+root. This establishes the default setup and connection path for that run.
+
+Normal Figma UI setup created two known private Drafts Design fixtures and
+showed an editable canvas. No native edits were attempted or qualified.
+Public `figma.open` failed with HTTP 403 before editor readiness for both the
+full observed creation URL and the bare canonical URL. Filename normalization
+is not a proven cause or fix. The creation flow made no main-document requests,
+so its ready canvas does not establish that direct file navigation works.
+
+The prepared normal in-app existing-file navigation diagnostic was queued but
+not admitted before its cap: zero methods ran. It adds no site or guard-policy
+conclusion. Native text/shape/image edits, modifier behavior in Figma, save and
+reload/restart persistence remain unverified. There is no cloud durability
+proof. Other auth methods, FigJam, Slides, Windows interactive sign-in and
+macOS live editing remain unproven. Authenticated Design
+edit/readback/save/reopen qualification remains required before release.
 
 ## Governed Windows replay
 

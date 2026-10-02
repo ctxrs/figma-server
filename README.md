@@ -23,14 +23,17 @@ client and any model provider it uses. Choose the agent accordingly.
 You need **Node.js 22.16.0 or newer**, npm, and a graphical desktop for sign-in.
 Chromium is installed in the next step.
 
-**v0.1.0 release candidate:** the URL below is the planned GitHub release asset.
-The asset is not yet published; the install command becomes usable when the
-release is available. This is an npm-format archive, not a package published
-to the npm registry. Recorded CLI and native browser fixtures have passed
-on Linux, macOS, and Windows in the tested configurations; those results apply
-to the recorded candidate archives. The new primitives have passed source
-checks; their native qualification is in progress. Real authenticated Figma
-editing remains unverified. See the
+**v0.1.0 release candidate:** the repository is public, but the GitHub release
+is still an unpublished draft. The URL below is the planned release asset;
+the install command is unavailable until publication. No npm registry package
+has been published.
+
+Native upload and modifier fixtures have passed on Linux, macOS ARM64, and
+Windows in the recorded configurations. Windows passes used an elevated token;
+ordinary-user setup remains unproven. Linux password sign-in persisted across
+a headless reopen of the default profile, but public file opening returned
+HTTP 403 before any native edits. Authenticated editing and saving remain
+unverified. See the
 [tested Node/browser configurations and validation boundaries](docs/TESTING.md).
 
 ```sh
